@@ -45,6 +45,7 @@ const me: Handler = async ({ user, url }) => {
     adminLevel: level,
     prefs: e.prefs ?? {},
     phone: e.phone,
+    contact: config.approverUsernames[0] ?? null,
   };
   if (e.status !== "active" || !e.role) return ok({ ...base, registered: e.status === "pending" && Boolean(e.role) });
 
@@ -340,7 +341,7 @@ function demoMe() {
   const period = periodOf(day, s.payoutDays);
   const payoutDay = payoutDayOf(period);
   return {
-    demo: true, uid: -1, name: "Анна Смирнова", role: "qualifier", status: "active", adminLevel: null, prefs: {},
+    demo: true, uid: -1, name: "Анна Смирнова", role: "qualifier", status: "active", adminLevel: null, prefs: {}, contact: config.approverUsernames[0] ?? null, joinedAt: "2026-09-02T09:00:00Z",
     balance: { period, periodLabel: humanRange(period), accrued: 24500, byKind: { salary: 10000, form: 14500 }, paid: null, balance: 24500 },
     payout: { day: payoutDay, daysLeft: daysBetween(day, payoutDay), periodDays: daysBetween(period[0], payoutDay), payoutDays: s.payoutDays },
     streak: 9, place: { place: 1, of: 4, metric: "forms" },
@@ -363,7 +364,10 @@ function demoWeekly(role: Role, metric: Metric, weeks: number) {
       : { "Олег (демо)": [1, 2, 1, 3, 2, 2, 4, 3], "Светлана (демо)": [2, 1, 2, 2, 3, 1, 2, 4], "Павел (демо)": [0, 1, 1, 1, 2, 2, 1, 2] };
   const series = Object.entries(base).map(([name, v], i) => ({ uid: -(i + 1), name, values: v.slice(-weeks), me: i === 0 }));
   const rating = series.map((p) => ({ uid: p.uid, name: p.name, value: p.values.at(-1)!, me: p.me })).sort((a, b) => b.value - a.value);
-  return { demo: true, role, metric, metrics: METRICS[role], weeks: [], series, rating };
+  const cur = weekOf(today());
+  const weeksList: Period[] = [];
+  for (let i = weeks - 1; i >= 0; i--) weeksList.push(weekOf(addDays(cur[0], -7 * i)));
+  return { demo: true, role, metric, metrics: METRICS[role], weeks: weeksList, series, rating };
 }
 
 // ───────────── Маршруты ─────────────
