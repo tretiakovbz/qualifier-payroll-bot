@@ -1,0 +1,15 @@
+{
+  "name": "qualifier-payroll-bot",
+  "version": "2.0.0-stage1",
+  "private": true,
+  "type": "module",
+  "description": "@sqlhunter_bot — рейтинг и зарплата квалификаторов и рекрутеров",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts",
+    "migrate": "bun run src/db/migrate.ts",
+    "cron:reminders": "bun run src/cron/reminders.ts",
+    "test": "bun test tests/unit",
+    "test:integration": "bun test tests/integration"
+  }
+}
