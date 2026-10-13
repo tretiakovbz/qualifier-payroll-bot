@@ -1,21 +1,36 @@
-// Сквозная проверка на настоящей базе Postgres с подставным Telegram API.
-// Запуск: TEST_DATABASE_URL=postgres://... bun test tests/integration.test.ts
-// Без TEST_DATABASE_URL тесты пропускаются.
+// Сквозная проверка v2 на настоящей базе Postgres с подставным Telegram API.
+// Запуск: TEST_DATABASE_URL=postgres://... bun run test:integration   (база очищается!)
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHmac } from "node:crypto";
 
 const DB_URL = Bun.env.TEST_DATABASE_URL;
 const GROUP = -1001;
-const ADMIN = 100;
+const OWNER = 100;
+const MANAGER = 555; // ник approver1
+const TOKEN = "1:T";
 const SECRET = "test-secret";
 
 const sent: { method: string; body: any }[] = [];
 let tg: ReturnType<typeof Bun.serve>;
 let app: { port: number; stop: () => void } | undefined;
+let base = "";
+let M: any = {}; // модули приложения после импорта
 
-describe.skipIf(!DB_URL)("бот целиком", () => {
-  let base = "";
+function initData(user: Record<string, unknown>) {
+  const params: Record<string, string> = { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify(user) };
+  const check = Object.entries(params).sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => `${k}=${v}`).join("\n");
+  const key = createHmac("sha256", "WebAppData").update(TOKEN).digest();
+  const hash = createHmac("sha256", key).update(check).digest("hex");
+  return new URLSearchParams({ ...params, hash }).toString();
+}
 
+const ANNA = { id: 7, first_name: "Анна", last_name: "Смирнова" }; // квалификатор из v1
+const MARIA = { id: 9, first_name: "Мария" }; // второй квалификатор из v1
+const IGOR = { id: 8, first_name: "Игорь", username: "igor_r" }; // новый рекрутер
+const STRANGER = { id: 77, first_name: "Гость" };
+
+describe.skipIf(!DB_URL)("бот v2 целиком", () => {
   beforeAll(async () => {
     tg = Bun.serve({
       port: 0,
@@ -29,19 +44,39 @@ describe.skipIf(!DB_URL)("бот целиком", () => {
     Object.assign(process.env, {
       DATABASE_URL: DB_URL,
       TELEGRAM_API_BASE: `http://localhost:${tg.port}`,
-      BOT_TOKEN: "1:T",
+      BOT_TOKEN: TOKEN,
       WEBHOOK_SECRET: SECRET,
       GROUP_ID: String(GROUP),
-      ADMIN_IDS: String(ADMIN),
+      ADMIN_IDS: String(OWNER),
       APPROVER_USERNAMES: "approver1",
+      PUBLIC_URL: "https://app.example",
+      LIVE_MODE: "1",
+      SCHEDULER: "0",
       PORT: "0",
     });
     const { db } = await import("../../src/db/client.ts");
     await db.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
+
+    // База в состоянии v1: два квалификатора, подтверждённые и неподтверждённые отчёты
+    const { migrate } = await import("../../src/db/migrate.ts");
+    const { migrations } = await import("../../src/db/migrations.ts");
+    await migrate(db, migrations.slice(0, 1));
+    await db`INSERT INTO employees(uid, name, can_dm) VALUES(7, 'Анна Смирнова', TRUE), (9, 'Мария', TRUE)`;
+    await db`INSERT INTO reports(chat, msg, uid, name, n, day, status) VALUES
+      (${GROUP}, 1, 7, 'Анна Смирнова', 4, '2026-10-06', 'approved'),
+      (${GROUP}, 2, 7, 'Анна Смирнова', 3, '2026-10-07', 'pending'),
+      (${GROUP}, 3, 9, 'Мария', 2, '2026-09-25', 'approved')`;
+
     const mod = await import("../../src/index.ts");
     app = mod.server;
     base = `http://localhost:${app!.port}`;
-  });
+    M.db = db;
+    M.settings = await import("../../src/core/settings.ts");
+    M.accruals = await import("../../src/core/accruals.ts");
+    M.bonuses = await import("../../src/core/bonuses.ts");
+    M.time = await import("../../src/lib/time.ts");
+    await M.settings.updateSettings({ startDate: "2000-01-01" }, OWNER);
+  }, 30_000);
 
   afterAll(() => {
     app?.stop();
@@ -54,69 +89,264 @@ describe.skipIf(!DB_URL)("бот целиком", () => {
       headers: { "content-type": "application/json", "X-Telegram-Bot-Api-Secret-Token": secret },
       body: JSON.stringify(update),
     });
-
+  const api = (path: string, user: any, init: RequestInit = {}) =>
+    fetch(`${base}${path}`, {
+      ...init,
+      headers: { "content-type": "application/json", "X-Telegram-Init-Data": initData(user), ...(init.headers ?? {}) },
+    });
   const now = Math.floor(Date.now() / 1000);
-  const anna = { id: 7, first_name: "Анна", last_name: "Смирнова" };
+  let msgId = 100;
+  const groupMsg = (from: any, text: string, id = ++msgId) => ({ message: { message_id: id, date: now, chat: { id: GROUP, type: "supergroup" }, from, text } });
+  const privateMsg = (from: any, text: string) => ({ message: { message_id: ++msgId, date: now, chat: { id: from.id, type: "private" }, from, text } });
+  const react = (user: any, id: number, emoji = "👍") => ({ message_reaction: { chat: { id: GROUP }, message_id: id, user, new_reaction: emoji ? [{ type: "emoji", emoji }] : [] } });
+  // неразрывные пробелы в суммах заменяем обычными, чтобы сравнивать текст
+  const lastText = (chatId?: number) => ([...sent].reverse().find((s) => s.method === "sendMessage" && (chatId === undefined || s.body.chat_id === chatId))?.body.text as string | undefined)?.replace(/\u00a0/g, " ");
+  const activeSum = async (uid: number, kind?: string) =>
+    (await M.db`SELECT COALESCE(SUM(amount),0)::int AS s FROM accruals WHERE uid = ${uid} AND cancelled_at IS NULL AND (${kind ?? null}::text IS NULL OR kind = ${kind ?? null})`)[0].s;
 
-  test("health", async () => {
-    const r = await (await fetch(`${base}/health`)).json();
-    expect(r.ok).toBe(true);
+  test("перенос v1: сотрудники стали квалификаторами, подтверждённые анкеты — начислениями", async () => {
+    const e = await M.db`SELECT uid, role, status FROM employees ORDER BY uid`;
+    expect(e.map((r: any) => [Number(r.uid), r.role, r.status])).toEqual([[7, "qualifier", "active"], [9, "qualifier", "active"]]);
+    expect(await activeSum(7, "form")).toBe(2000); // 4 анкеты × 500, неподтверждённый не засчитан
+    const maria = await M.db`SELECT period_start::text AS p FROM accruals WHERE uid = 9`;
+    expect(maria[0].p).toBe("2026-09-20"); // 25 сентября → период 20.09–04.10
   });
 
-  test("вебхук без секрета отклоняется", async () => {
+  test("вебхук без секрета закрыт", async () => {
     expect((await hook({}, "wrong")).status).toBe(403);
   });
 
-  test("отчёт принимается и бот отвечает в чате", async () => {
+  let annaFive = 0;
+  test("отчёт квалификатора: человеческий ответ без цифр", async () => {
     sent.length = 0;
-    const r = await hook({
-      message: { message_id: 1, date: now, chat: { id: GROUP, type: "supergroup" }, from: anna, text: "#отчет\nОбработано недозвонов: 50\nАнкет собрано: 5" },
-    });
-    expect(r.status).toBe(200);
-    const reply = sent.find((s) => s.method === "sendMessage");
-    expect(reply?.body.chat_id).toBe(GROUP);
-    expect(reply?.body.reply_to_message_id).toBe(1);
+    await hook(groupMsg(ANNA, "#отчет\nОбработано недозвонов: 102\nАнкет собрано: 5"));
+    annaFive = msgId;
+    const t = lastText(GROUP)!;
+    expect(t).toBeTruthy();
+    expect(t).not.toMatch(/\d/);
   });
 
-  test("подтверждение реакцией и /me", async () => {
-    await hook({ message_reaction: { chat: { id: GROUP }, message_id: 1, user: { id: 555, username: "Approver1" }, new_reaction: [{ type: "emoji", emoji: "👍" }] } });
+  test("нулевой отчёт — мягкая фраза", async () => {
     sent.length = 0;
-    await hook({ message: { message_id: 2, date: now, chat: { id: 7, type: "private" }, from: anna, text: "/me" } });
-    const msg = sent.find((s) => s.method === "sendMessage")!;
-    expect(msg.body.text).toContain("Подтверждено: 5");
-    expect(msg.body.text.replace(/\s/g, " ")).toContain("2 500 ₽");
+    await hook(groupMsg(MARIA, "#отчет\nОбработано недозвонов: 0\nАнкет собрано: 0"));
+    const { PHRASES } = await import("../../src/lib/phrases.ts");
+    expect(PHRASES.zero).toContain(lastText(GROUP));
+  });
+
+  test("подтверждение 👍 менеджером → начисление и уведомление", async () => {
+    const id = annaFive;
+    sent.length = 0;
+    await hook(react({ id: MANAGER, username: "Approver1" }, id));
+    expect(await activeSum(7, "form")).toBe(4500);
+    expect(lastText(7)).toContain("2 500");
+    const n = await M.db`SELECT title FROM notifications WHERE uid = 7`;
+    expect(n.length).toBe(1);
   });
 
   test("реакция постороннего ничего не меняет", async () => {
-    await hook({ message: { message_id: 3, date: now, chat: { id: GROUP, type: "supergroup" }, from: anna, text: "#отчет\nАнкет собрано: 2" } });
-    await hook({ message_reaction: { chat: { id: GROUP }, message_id: 3, user: { id: 999, username: "stranger" }, new_reaction: [{ type: "emoji", emoji: "👍" }] } });
-    sent.length = 0;
-    await hook({ message: { message_id: 4, date: now, chat: { id: 7, type: "private" }, from: anna, text: "/me" } });
-    expect(sent[0].body.text).toContain("Подтверждено: 5");
+    await hook(groupMsg(ANNA, "#отчет\nОбработано недозвонов: 10\nАнкет собрано: 2"));
+    await hook(react(STRANGER, msgId));
+    expect(await activeSum(7, "form")).toBe(4500);
   });
 
-  test("ведомость: настоящие переносы строк", async () => {
-    sent.length = 0;
-    await hook({ message: { message_id: 5, date: now, chat: { id: GROUP, type: "supergroup" }, from: { id: ADMIN, first_name: "Босс" }, text: "/payroll" } });
-    const text: string = sent[0].body.text;
-    expect(text).not.toContain("\\n");
-    expect(text.split("\n").length).toBeGreaterThanOrEqual(3);
-    expect(text).toContain("Анна Смирнова: 5 × 500");
+  test("правка подтверждённого отчёта снимает деньги до повторного подтверждения", async () => {
+    const id = annaFive;
+    await hook({ edited_message: { message_id: id, date: now, chat: { id: GROUP, type: "supergroup" }, from: ANNA, text: "#отчет\nОбработано недозвонов: 102\nАнкет собрано: 6" } });
+    expect(await activeSum(7, "form")).toBe(2000);
+    await hook(react({ id: OWNER }, id));
+    expect(await activeSum(7, "form")).toBe(5000);
   });
 
-  test("CSV-выгрузка с BOM", async () => {
+  test("незарегистрированный: отчёт сохранён, подсказка про регистрацию", async () => {
     sent.length = 0;
-    await hook({ message: { message_id: 6, date: now, chat: { id: ADMIN, type: "private" }, from: { id: ADMIN, first_name: "Босс" }, text: "/export" } });
-    const doc = sent.find((s) => s.method === "sendDocument")!;
-    const file = (doc.body as FormData).get("document") as File;
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
-    const text = new TextDecoder().decode(bytes);
-    expect(text).toContain("\r\n");
-    expect(text).not.toContain("\\r\\n");
+    await hook(groupMsg(STRANGER, "#отчет\nАнкет собрано: 3"));
+    expect(lastText(GROUP)).toContain("зарегистрируйтесь");
+    const r = await M.db`SELECT status FROM reports WHERE uid = 77`;
+    expect(r[0].status).toBe("pending");
   });
 
-  test("API статистики без подписи — 401", async () => {
-    expect((await fetch(`${base}/api/stats`)).status).toBe(401);
+  test("регистрация рекрутера: заявка админам, одобрение кнопкой, приветствие", async () => {
+    await hook(privateMsg(IGOR, "/start"));
+    sent.length = 0;
+    const r = await api("/api/v2/register", IGOR, { method: "POST", body: JSON.stringify({ fullName: "Игорь Петров", city: "Москва", role: "recruiter" }) });
+    expect(r.status).toBe(200);
+    expect((await r.json()).status).toBe("pending");
+    const toOwner = sent.find((s) => s.method === "sendMessage" && s.body.chat_id === OWNER);
+    expect(toOwner?.body.text).toContain("Игорь Петров");
+    expect(toOwner?.body.reply_markup.inline_keyboard[0][0].callback_data).toBe("reg:ok:8");
+
+    // повторная заявка не принимается
+    const again = await api("/api/v2/register", IGOR, { method: "POST", body: JSON.stringify({ fullName: "Игорь", role: "qualifier" }) });
+    expect(again.status).toBe(400);
+
+    sent.length = 0;
+    await hook({ callback_query: { id: "cb1", from: { id: OWNER }, data: "reg:ok:8", message: { message_id: 5, date: now, chat: { id: OWNER, type: "private" } } } });
+    expect(lastText(8)).toContain("одобрена");
+    const e = await M.db`SELECT role, status FROM employees WHERE uid = 8`;
+    expect([e[0].role, e[0].status]).toEqual(["recruiter", "active"]);
+  });
+
+  test("посторонний не может одобрять заявки", async () => {
+    await M.db`INSERT INTO employees(uid, name, role, status) VALUES(78, 'X', 'qualifier', 'pending')`;
+    await hook({ callback_query: { id: "cb2", from: STRANGER, data: "reg:ok:78" } });
+    const e = await M.db`SELECT status FROM employees WHERE uid = 78`;
+    expect(e[0].status).toBe("pending");
+  });
+
+  test("отчёт рекрутера по ТЗ: 210 000 ₽ после подтверждения", async () => {
+    sent.length = 0;
+    await hook(groupMsg(IGOR, "#отчет\nПолучили документы: 4\nОтправлено на ВВК: 2\nЗаключено контрактов: 3\nУфа и офицеры: 1"));
+    const { PHRASES } = await import("../../src/lib/phrases.ts");
+    expect(PHRASES.contract).toContain(lastText(GROUP));
+    await hook(react({ id: OWNER }, msgId));
+    expect(await activeSum(8, "contract")).toBe(210000);
+  });
+
+  test("отчёт не своей роли не сохраняется", async () => {
+    sent.length = 0;
+    await hook(groupMsg(IGOR, "#отчет\nАнкет собрано: 5"));
+    expect(lastText(GROUP)).toContain("рекрутер");
+    const r = await M.db`SELECT 1 FROM reports WHERE msg = ${msgId}`;
+    expect(r.length).toBe(0);
+  });
+
+  test("отклонение командой /reject с причиной", async () => {
+    await hook(groupMsg(ANNA, "#отчет\nАнкет собрано: 1"));
+    const id = msgId;
+    sent.length = 0;
+    await hook({ message: { message_id: ++msgId, date: now, chat: { id: GROUP, type: "supergroup" }, from: { id: OWNER }, text: "/reject дубль", reply_to_message: { message_id: id } } });
+    const r = await M.db`SELECT status, reject_reason FROM reports WHERE msg = ${id}`;
+    expect([r[0].status, r[0].reject_reason]).toEqual(["rejected", "дубль"]);
+    expect(lastText(7)).toContain("дубль");
+  });
+
+  test("оклад: половина месяца квалификаторам, рекрутерам выключен", async () => {
+    await M.accruals.ensureSalary();
+    await M.accruals.ensureSalary(); // повтор не задваивает
+    expect(await activeSum(7, "salary")).toBe(10000);
+    expect(await activeSum(9, "salary")).toBe(10000);
+    expect(await activeSum(8, "salary")).toBe(0);
+  });
+
+  test("автобонус «лучший по анкетам»: порог и деление при ничьей", async () => {
+    const week = ["2026-08-02", "2026-08-06"]; // неделя без других отчётов
+    const d = (i: number) => M.time.addDays(week[0], i);
+    await M.db`INSERT INTO reports(chat, msg, uid, name, n, day, status, role, metrics) VALUES
+      (${GROUP}, 9001, 7, 'Анна', 12, ${d(0)}, 'approved', 'qualifier', '{"forms":12,"calls":50}'),
+      (${GROUP}, 9002, 7, 'Анна', 10, ${d(1)}, 'approved', 'qualifier', '{"forms":10,"calls":40}'),
+      (${GROUP}, 9003, 9, 'Мария', 22, ${d(2)}, 'approved', 'qualifier', '{"forms":22,"calls":20}'),
+      (${GROUP}, 9004, 9, 'Мария', 30, ${d(3)}, 'pending', 'qualifier', '{"forms":30,"calls":0}')`;
+    const rules = await M.bonuses.listRules();
+    const forms = rules.find((r: any) => r.code === "top_forms_week");
+    const r1 = await M.bonuses.evaluateRule({ ...forms, enabled: true }, week);
+    expect(r1.winners.map((w: any) => [w.uid, w.amount])).toEqual([[7, 2500], [9, 2500]]); // 22 = 22, неподтверждённые не считаются
+    const again = await M.bonuses.evaluateRule({ ...forms, enabled: true }, week);
+    expect(again.skipped).toBe(true);
+
+    const high = await M.bonuses.evaluateRule({ ...forms, id: 999, threshold: 50 }, week);
+    expect(high.winners).toEqual([]); // порог не достигнут
+  });
+
+  test("ручной бонус «без 5 задержек»: галочка и снятие", async () => {
+    const rules = await M.bonuses.listRules();
+    const manual = rules.find((r: any) => r.code === "no_delays_week");
+    const get = await api(`/api/v2/admin/manual/${manual.id}`, { id: MANAGER, username: "approver1" });
+    const data = await get.json();
+    expect(data.staff.map((s: any) => s.uid).sort()).toEqual([7, 9]); // только квалификаторы
+    const key = data.key;
+    let r = await api(`/api/v2/admin/manual/${manual.id}`, { id: MANAGER, username: "approver1" }, { method: "POST", body: JSON.stringify({ key, uid: 9, award: true }) });
+    expect((await r.json()).staff.find((s: any) => s.uid === 9).awarded).toBe(10000);
+    r = await api(`/api/v2/admin/manual/${manual.id}`, { id: MANAGER, username: "approver1" }, { method: "POST", body: JSON.stringify({ key, uid: 9, award: true }) });
+    const bonusCount = await M.db`SELECT COUNT(*)::int AS n FROM accruals WHERE uid = 9 AND rule_id = ${manual.id} AND cancelled_at IS NULL`;
+    expect(bonusCount[0].n).toBe(1); // повтор не задваивает
+    await api(`/api/v2/admin/manual/${manual.id}`, { id: MANAGER, username: "approver1" }, { method: "POST", body: JSON.stringify({ key, uid: 9, award: false }) });
+    const after = await M.db`SELECT COUNT(*)::int AS n FROM accruals WHERE uid = 9 AND rule_id = ${manual.id} AND cancelled_at IS NULL`;
+    expect(after[0].n).toBe(0);
+  });
+
+  test("ручное начисление и отмена (отмена — только владелец)", async () => {
+    const r = await api("/api/v2/admin/accruals", { id: MANAGER, username: "approver1" }, { method: "POST", body: JSON.stringify({ uid: 8, amount: 3000, comment: "Сложный кандидат" }) });
+    expect(r.status).toBe(200);
+    const acc = await r.json();
+    expect(lastText(8)).toContain("Сложный кандидат");
+    expect((await api(`/api/v2/admin/accruals/${acc.id}`, { id: MANAGER, username: "approver1" }, { method: "DELETE" })).status).toBe(403);
+    expect((await api(`/api/v2/admin/accruals/${acc.id}`, { id: OWNER }, { method: "DELETE" })).status).toBe(200);
+    expect(await activeSum(8, "manual")).toBe(0);
+  });
+
+  test("баланс сотрудника в /api/v2/me", async () => {
+    const r = await (await api("/api/v2/me", IGOR)).json();
+    expect(r.role).toBe("recruiter");
+    expect(r.balance.accrued).toBe(210000);
+    expect(r.payout.payoutDays).toEqual([5, 20]);
+    expect(r.recent[0].kind).toBe("contract");
+  });
+
+  test("незарегистрированный в /api/v2/me — без денег", async () => {
+    const r = await (await api("/api/v2/me", STRANGER)).json();
+    expect(r.balance).toBeUndefined();
+    expect(r.status).toBe("new");
+    expect(r.registered).toBe(false);
+  });
+
+  test("статистика: квалификатор не видит рекрутеров", async () => {
+    const r = await (await api("/api/v2/stats/weekly?metric=forms", ANNA)).json();
+    expect(r.series.map((s: any) => s.uid).sort()).toEqual([7, 9]);
+    expect((await api("/api/v2/stats/weekly?metric=contracts", ANNA)).status).toBe(400);
+    const rec = await (await api("/api/v2/stats/weekly", IGOR)).json();
+    expect(rec.series.map((s: any) => s.uid)).toEqual([8]);
+  });
+
+  test("права: сотрудник не видит админку, менеджер не меняет настройки, владелец меняет", async () => {
+    expect((await api("/api/v2/admin/overview", ANNA)).status).toBe(403);
+    expect((await api("/api/v2/admin/overview", { id: MANAGER, username: "approver1" })).status).toBe(200);
+    expect((await api("/api/v2/admin/settings", { id: MANAGER, username: "approver1" }, { method: "PUT", body: JSON.stringify({ rates: { perForm: 1 } }) })).status).toBe(403);
+    const put = await api("/api/v2/admin/settings", { id: OWNER }, { method: "PUT", body: JSON.stringify({ rates: { perForm: 600 } }) });
+    expect(put.status).toBe(200);
+    const got = await (await api("/api/v2/admin/settings", { id: MANAGER, username: "approver1" })).json();
+    expect(got.settings.rates.perForm).toBe(600); // второй админ сразу видит изменение
+    expect(got.settings.rates.contractBase).toBe(80000);
+    const bad = await api("/api/v2/admin/settings", { id: OWNER }, { method: "PUT", body: JSON.stringify({ payoutDays: [20, 5] }) });
+    expect(bad.status).toBe(400);
+  });
+
+  test("смена суммы бонуса владельцем", async () => {
+    const rules = await M.bonuses.listRules();
+    const r = rules.find((x: any) => x.code === "top_forms_week");
+    const res = await api(`/api/v2/admin/rules/${r.id}`, { id: OWNER }, { method: "PUT", body: JSON.stringify({ ...r, amount: 7000, enabled: true }) });
+    expect(res.status).toBe(200);
+    expect((await res.json()).amount).toBe(7000);
+  });
+
+  test("настройки профиля сохраняются", async () => {
+    const r = await api("/api/v2/me/prefs", ANNA, { method: "POST", body: JSON.stringify({ theme: "military", sounds: false, reminderTime: "18:45", notify: { bonus: false } }) });
+    const p = await r.json();
+    expect(p).toMatchObject({ theme: "military", sounds: false, reminderTime: "18:45", notify: { bonus: false } });
+    const bad = await (await api("/api/v2/me/prefs", ANNA, { method: "POST", body: JSON.stringify({ theme: "hack", reminderTime: "99:00" }) })).json();
+    expect(bad.theme).toBe("military");
+  });
+
+  test("выключенные уведомления о бонусах не приходят в личку", async () => {
+    sent.length = 0;
+    await api("/api/v2/admin/accruals", { id: OWNER }, { method: "POST", body: JSON.stringify({ uid: 7, amount: 1000, comment: "Тест" }) });
+    expect(lastText(7)).toBeUndefined();
+    const n = await M.db`SELECT COUNT(*)::int AS n FROM notifications WHERE uid = 7 AND body = 'Тест'`;
+    expect(n[0].n).toBe(1); // в ленте приложения всё равно есть
+  });
+
+  test("ведомость /payroll в личке админа", async () => {
+    sent.length = 0;
+    await hook(privateMsg({ id: OWNER, first_name: "Босс" }, "/start"));
+    await hook(privateMsg({ id: OWNER, first_name: "Босс" }, "/payroll"));
+    const t = lastText(OWNER)!;
+    expect(t).toContain("Ведомость");
+    expect(t).toContain("Игорь Петров (рекрутер)");
+    expect(t).not.toContain("\\n");
+  });
+
+  test("демо-режим доступен без авторизации, админка — нет", async () => {
+    expect((await fetch(`${base}/api/v2/me?demo=1`)).status).toBe(200);
+    expect((await fetch(`${base}/api/v2/stats/weekly?demo=1&role=recruiter`)).status).toBe(200);
+    expect((await fetch(`${base}/api/v2/admin/overview?demo=1`)).status).toBe(401);
   });
 });

@@ -17,7 +17,7 @@ function list(name: string): string[] {
 
 export const config = {
   serviceName: env.SERVICE_NAME ?? "qualifier-bot",
-  version: "2.0.0-stage1",
+  version: "2.0.0-stage3",
   port: num("PORT", 3000),
 
   botToken: env.BOT_TOKEN ?? "",
@@ -26,6 +26,7 @@ export const config = {
   webhookSecret: env.WEBHOOK_SECRET ?? "",
   databaseUrl: env.DATABASE_URL ?? "",
   publicUrl: env.PUBLIC_URL ?? "",
+  botUsername: (env.BOT_USERNAME ?? "sqlhunter_bot").replace(/^@/, ""),
 
   /** Рабочий чат, куда сотрудники пишут отчёты */
   groupId: num("GROUP_ID"),
@@ -35,6 +36,13 @@ export const config = {
   approverUsernames: list("APPROVER_USERNAMES").map((s) => s.replace(/^@/, "").toLowerCase()),
   /** Ставка за подтверждённую анкету, ₽ */
   ratePerForm: num("RATE_PER_FORM", 500),
+  /**
+   * Боевой режим: рассылать личные сообщения (поздравления, напоминания, уведомления).
+   * На тестовом сервисе выключен — он считает всё в базе, но никому не пишет.
+   */
+  liveMode: env.LIVE_MODE === "1",
+  /** Запускать фоновый планировщик (начисления, бонусы, напоминания) */
+  schedulerEnabled: env.SCHEDULER !== "0",
   /** Часовой пояс отчётности в часах от UTC (Москва = 3) */
   tzOffsetHours: num("TZ_OFFSET_HOURS", 3),
 };

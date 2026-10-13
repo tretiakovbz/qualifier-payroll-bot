@@ -4,6 +4,8 @@ import { config } from "./config.ts";
 import { migrate } from "./db/migrate.ts";
 import { handleUpdate } from "./bot/updates.ts";
 import { statsHandler, remindersHandler } from "./api/routes.ts";
+import { handleApiV2 } from "./api/v2.ts";
+import { startScheduler } from "./core/scheduler.ts";
 
 const miniApp = Bun.file(new URL("./miniapp/index.html", import.meta.url));
 
@@ -28,6 +30,9 @@ export const server = Bun.serve({
       });
     }
 
+    const v2 = await handleApiV2(req, url);
+    if (v2) return v2;
+
     if (url.pathname === "/api/stats" && req.method === "GET") return statsHandler(req, url);
     if (url.pathname === "/api/reminders" && req.method === "POST") return remindersHandler(req);
 
@@ -49,4 +54,5 @@ export const server = Bun.serve({
   },
 });
 
+startScheduler();
 console.log(`[start] ${config.serviceName} ${config.version} on :${server.port}`);

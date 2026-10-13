@@ -1,12 +1,17 @@
-// Обработка входящих обновлений Telegram (вебхук).
-// Этап 1: поведение как в v1, но с исправленными ошибками.
+// Обработка входящих обновлений Telegram (вебхук), версия 2.
 
-import { config, canApprove, isAdmin } from "../config.ts";
-import { api, send, sendDocument, fullName, type TgUser } from "../lib/telegram.ts";
-import { parseQualifierReport } from "../lib/report.ts";
-import { periodOf, periodBack, nowLocal, addDays, toDay, dayOfMessage } from "../lib/time.ts";
-import * as q from "../db/queries.ts";
-import { REPLIES } from "./replies.ts";
+import { config } from "../config.ts";
+import { api, send, sendDocument, type TgUser } from "../lib/telegram.ts";
+import { parseReport, isReportTag, reportTemplate, type Role } from "../lib/report.ts";
+import { PHRASES, pickIndex } from "../lib/phrases.ts";
+import { periodOf, periodBack, dayOfMessage, humanRange } from "../lib/time.ts";
+import { db } from "../db/client.ts";
+import * as staff from "../core/employees.ts";
+import { saveReport, setReportStatus } from "../core/reports.ts";
+import { listDirections } from "../core/directions.ts";
+import { getSettings } from "../core/settings.ts";
+import { payroll, markPaid } from "../core/accruals.ts";
+import { notify } from "../core/notify.ts";
 
 interface TgMessage {
   message_id: number;
@@ -14,6 +19,7 @@ interface TgMessage {
   chat: { id: number; type: string };
   from?: TgUser;
   text?: string;
+  contact?: { phone_number: string; user_id?: number };
   reply_to_message?: { message_id: number };
 }
 
@@ -30,10 +36,11 @@ export interface TgUpdate {
 }
 
 const rub = (n: number) => n.toLocaleString("ru-RU") + " ₽";
-const remindersText = (on: boolean) => "🔔 Напоминания в 19:30 МСК (вс–чт): " + (on ? "Включены" : "Выключены");
-const remindersKeyboard = (on: boolean) => ({
-  inline_keyboard: [[{ text: on ? "🔕 Выключить" : "🔔 Включить", callback_data: "toggle_reminder" }]],
-});
+const ROLE_RU: Record<Role, string> = { qualifier: "квалификатор", recruiter: "рекрутер" };
+
+function appButton(text: string, path = "") {
+  return { inline_keyboard: [[{ text, web_app: { url: config.publicUrl + path } }]] };
+}
 
 export async function handleUpdate(u: TgUpdate): Promise<void> {
   const msg = u.message ?? u.edited_message;
@@ -46,161 +53,235 @@ export async function handleUpdate(u: TgUpdate): Promise<void> {
     await handlePrivateMessage(msg);
     return;
   }
-  if (u.callback_query?.data === "toggle_reminder") {
-    await handleReminderToggle(u.callback_query);
+  if (u.callback_query) {
+    await handleCallback(u.callback_query);
     return;
   }
-  if (u.message_reaction && u.message_reaction.chat.id === config.groupId && canApprove(u.message_reaction.user)) {
+  if (u.message_reaction && u.message_reaction.chat.id === config.groupId && u.message_reaction.user) {
     const r = u.message_reaction;
+    const level = await staff.adminLevel(r.user!);
+    if (!level) return;
     const yes = (r.new_reaction ?? []).some((x) => x.type === "emoji" && x.emoji === "👍");
-    await q.setReportStatus(r.message_id, yes ? "approved" : "pending");
+    await setReportStatus(r.message_id, yes ? "approved" : "pending", r.user!.id);
   }
 }
 
 async function handleGroupMessage(msg: TgMessage, edited: boolean) {
   const from = msg.from!;
   const text = msg.text ?? "";
-  const report = parseQualifierReport(text);
 
-  if (report) {
-    const name = fullName(from);
-    await q.upsertReport({ msg: msg.message_id, uid: from.id, name, n: report.forms, day: dayOfMessage(msg.date) });
-    if (!edited) {
-      await q.touchEmployee(from.id, name);
-      const idx = await q.nextReplyIndex(from.id, REPLIES.length);
-      await send(config.groupId, `${REPLIES[idx]} · ${report.forms} анкет ожидают подтверждения 👍`, {
+  if (isReportTag(text)) {
+    await handleReport(msg, edited);
+    return;
+  }
+
+  const cmd = text.split(" ")[0].split("@")[0];
+  if (["/stat", "/week", "/history", "/app", "/me"].includes(cmd)) {
+    // Статистика теперь в Mini App: у каждой роли своя, и чат не засоряется
+    await send(config.groupId, "📊 Статистика, рейтинг и ваш баланс — в приложении бота", {
+      reply_to_message_id: msg.message_id,
+      reply_markup: { inline_keyboard: [[{ text: "Открыть", url: `https://t.me/${config.botUsername}?startapp=stats` }]] },
+    });
+    return;
+  }
+
+  if ((cmd === "/approve" || cmd === "/reject") && msg.reply_to_message) {
+    if (!(await staff.adminLevel(from))) return;
+    const reason = cmd === "/reject" ? text.split(" ").slice(1).join(" ").trim() || undefined : undefined;
+    await setReportStatus(msg.reply_to_message.message_id, cmd === "/approve" ? "approved" : "rejected", from.id, reason);
+    await api("setMessageReaction", {
+      chat_id: config.groupId,
+      message_id: msg.message_id,
+      reaction: [{ type: "emoji", emoji: "👌" }],
+    }).catch(() => {});
+  }
+}
+
+async function handleReport(msg: TgMessage, edited: boolean) {
+  const from = msg.from!;
+  const text = msg.text ?? "";
+  const employee = await staff.touch(from);
+  const directions = await listDirections();
+  const parsed = parseReport(text, directions);
+
+  if (!parsed.ok) {
+    if (parsed.reason === "invalid" && !edited) {
+      const role = employee.role ?? "qualifier";
+      await send(config.groupId, `Не получилось разобрать отчёт: ${parsed.message}.\nШаблон:\n${reportTemplate(role)}`, {
         reply_to_message_id: msg.message_id,
       });
     }
     return;
   }
 
-  const cmd = text.split(" ")[0].split("@")[0];
-  const [a, b] = periodOf();
-
-  if (cmd === "/stat" || cmd === "/week") {
-    let from_ = a;
-    let to = b;
-    if (cmd === "/week") {
-      to = toDay(nowLocal());
-      from_ = addDays(to, -6);
+  if (employee.status !== "active" || !employee.role) {
+    if (!edited) {
+ const waiting = employee.status === "pending" && employee.role;
+      const hint =
+        waiting
+          ? "Отчёт сохранён. Он засчитается, как только админ одобрит вашу регистрацию."
+          : "Отчёт сохранён. Чтобы он засчитался, зарегистрируйтесь в боте — это минута.";
+      await send(config.groupId, hint, {
+        reply_to_message_id: msg.message_id,
+        reply_markup: waiting ? undefined : { inline_keyboard: [[{ text: "Зарегистрироваться", url: `https://t.me/${config.botUsername}?start=register` }]] },
+      });
     }
-    const rows = await q.ranking(from_, to);
-    const lines = rows.map((r, i) => `${i + 1}. ${r.name}: ${r.approved} ✅, ${r.pending} ⏳`).join("\n");
-    await send(config.groupId, `🏆 Рейтинг ${from_} — ${to}\n${lines || "Нет отчётов"}`);
-    return;
-  }
-
-  if ((cmd === "/approve" || cmd === "/reject") && canApprove(from) && msg.reply_to_message) {
-    await q.setReportStatus(msg.reply_to_message.message_id, cmd === "/approve" ? "approved" : "rejected");
-    await send(config.groupId, "Статус отчёта обновлён.");
-    return;
-  }
-
-  if (cmd === "/payroll" && isAdmin(from.id)) {
-    const rows = await q.ranking(a, b);
-    const total = rows.reduce((s, r) => s + r.approved * config.ratePerForm, 0);
-    const lines = rows.map((r) => `${r.name}: ${r.approved} × ${config.ratePerForm} = ${rub(r.approved * config.ratePerForm)}`);
-    await send(from.id, [`💰 Ведомость ${a} — ${b}`, ...lines, `Итого: ${rub(total)}`].join("\n"));
-    return;
-  }
-
-  if (cmd === "/history") {
-    const out: string[] = [];
-    for (let i = 1; i <= 8; i++) {
-      const [s, e] = periodBack(i);
-      out.push(`${s}—${e}: ${await q.teamApprovedCount(s, e)}`);
+  } else if (employee.role !== parsed.role) {
+    if (!edited) {
+      await send(
+        config.groupId,
+        `Похоже на отчёт ${parsed.role === "qualifier" ? "квалификатора" : "рекрутера"}, а вы зарегистрированы как ${ROLE_RU[employee.role]}. Шаблон:\n${reportTemplate(employee.role)}`,
+        { reply_to_message_id: msg.message_id },
+      );
     }
-    await send(config.groupId, ["📚 История подтверждённых анкет", ...out].join("\n"));
     return;
   }
 
-  if (cmd === "/paid" && isAdmin(from.id)) {
-    await send(config.groupId, "🔒 Отметки выплат доступны только в личном чате бота: /paid TELEGRAM_ID");
-    return;
-  }
-  if (cmd === "/export" && isAdmin(from.id)) {
-    await send(config.groupId, "🔒 Выгрузка доступна в личном чате бота: /export");
-    return;
-  }
-  if (cmd === "/app") {
-    await send(config.groupId, "📊 Статистика квалификаторов", {
-      reply_markup: { inline_keyboard: [[{ text: "Открыть Mini App", url: config.publicUrl }]] },
-    });
-  }
+  await saveReport({
+    msg: msg.message_id,
+    uid: from.id,
+    name: staff.displayName(employee),
+    day: dayOfMessage(msg.date),
+    role: parsed.role,
+    metrics: parsed.metrics,
+  });
+
+  if (edited || employee.status !== "active") return;
+
+  const s = await getSettings();
+  const main = parsed.role === "qualifier" ? parsed.metrics.forms ?? 0 : parsed.metrics.contracts ?? 0;
+  const anything = Object.entries(parsed.metrics).some(([k, v]) => k !== "special" && (v as number) > 0);
+  const pool =
+    parsed.role === "recruiter" && main > 0
+      ? PHRASES.contract
+      : !anything
+        ? s.phrases?.zero?.length ? s.phrases.zero : PHRASES.zero
+        : s.phrases?.normal?.length ? s.phrases.normal : PHRASES.normal;
+  const idx = pickIndex(pool.length, employee.reply_idx);
+  await db`UPDATE employees SET reply_idx = ${idx} WHERE uid = ${from.id}`;
+  await send(config.groupId, pool[idx], { reply_to_message_id: msg.message_id });
 }
 
 async function handlePrivateMessage(msg: TgMessage) {
   const from = msg.from!;
   const uid = from.id;
   const text = msg.text ?? "";
-  const [a, b] = periodOf();
-  await q.touchEmployee(uid, fullName(from), true);
+  const e = await staff.touch(from, { canDm: true });
+
+  if (msg.contact) {
+    if (msg.contact.user_id === uid) {
+      await staff.setPhone(uid, msg.contact.phone_number);
+      await send(uid, "Спасибо, номер сохранён. Вернитесь в приложение, чтобы закончить регистрацию.", {
+        reply_markup: appButton("Продолжить регистрацию", "#/register"),
+      });
+    }
+    return;
+  }
+
+  const level = staff.adminLevelOf(e);
+
+  if (text.startsWith("/start")) {
+    if (e.status === "active" && e.role) {
+      await send(uid, `С возвращением, ${staff.displayName(e).split(" ")[0]}! Баланс, рейтинг и настройки — в приложении.`, {
+        reply_markup: appButton("Открыть приложение"),
+      });
+    } else if (e.status === "pending" && e.role) {
+      await send(uid, "Ваша заявка у админа. Как только её одобрят, я пришлю сообщение.");
+    } else {
+      await send(uid, "Привет! Здесь считаются ваши результаты, бонусы и зарплата. Для начала — короткая регистрация.", {
+        reply_markup: appButton("Зарегистрироваться", "#/register"),
+      });
+    }
+    return;
+  }
 
   if (text === "/reminders" || text === "/settings") {
-    const on = await q.getReminders(uid);
-    await send(uid, remindersText(on), { reply_markup: remindersKeyboard(on) });
+    await send(uid, "Уведомления, напоминания и тема — в настройках профиля.", {
+      reply_markup: appButton("Открыть настройки", "#/profile/settings"),
+    });
     return;
   }
 
-  if (text.startsWith("/paid") && isAdmin(uid)) {
+  // Команды админа в личке
+  if (!level) return;
+  const s = await getSettings();
+
+  if (text === "/payroll") {
+    const period = periodOf(undefined, s.payoutDays);
+    const rows = await payroll(period);
+    const total = rows.reduce((sum: number, r: any) => sum + r.total, 0);
+    const lines = rows.map(
+      (r: any) => `${r.name} (${ROLE_RU[r.role as Role] ?? "—"}): ${rub(r.total)}${r.paid !== null ? " ✅" : ""}`,
+    );
+    await send(uid, [`💰 Ведомость ${humanRange(period)}`, ...lines, `Итого: ${rub(total)}`].join("\n"));
+    return;
+  }
+
+  if (text.startsWith("/paid") && level === "owner") {
     const employee = Number(text.split(/\s+/)[1]);
     if (!Number.isSafeInteger(employee) || employee <= 0) {
-      await send(uid, "Используй: /paid TELEGRAM_ID (отмечает выплату за завершённый период)");
+      await send(uid, "Используй: /paid TELEGRAM_ID — отмечает выплату за завершённый период. Удобнее — в кабинете админа.");
       return;
     }
-    const [from_, to] = periodBack(1);
-    const n = await q.approvedCount(employee, from_, to);
-    if (n === 0) {
-      await send(uid, `Нет подтверждённых анкет сотрудника за ${from_} — ${to}`);
-      return;
-    }
-    const amount = n * config.ratePerForm;
-    await q.markPaid(employee, from_, amount, uid);
-    await send(uid, `✅ Выплата отмечена: ${employee} · ${rub(amount)} за ${from_} — ${to}`);
+    const period = periodBack(1, undefined, s.payoutDays);
+    const sum = await markPaid(employee, period, uid);
+    await send(uid, `✅ Выплата отмечена: ${employee} · ${rub(sum)} за ${humanRange(period)}`);
     return;
   }
 
-  if (text === "/export" && isAdmin(uid)) {
-    const rows = await q.ranking(a, b);
-    const quote = (x: unknown) => '"' + String(x).replaceAll('"', '""') + '"';
-    const header = ["Период", "Telegram ID", "Сотрудник", "Подтверждено", "Ожидает", "Начислено ₽", "Выплачено ₽", "Статус"];
-    const lines = await Promise.all(
-      rows.map(async (r) => {
-        const paid = await q.paidAmount(r.uid, a);
-        return [a, r.uid, r.name, r.approved, r.pending, r.approved * config.ratePerForm, paid ?? 0, paid !== null ? "Оплачено" : "Не оплачено"]
-          .map(quote)
-          .join(";");
-      }),
+  if (text === "/export") {
+    const period = periodOf(undefined, s.payoutDays);
+    const rows = await payroll(period);
+    const quote = (x: unknown) => '"' + String(x ?? "").replaceAll('"', '""') + '"';
+    const header = ["Период", "Telegram ID", "Сотрудник", "Роль", "Оклад ₽", "Анкеты/контракты ₽", "Бонусы ₽", "Начислено ₽", "Выплачено ₽"];
+    const lines = rows.map((r: any) =>
+      [humanRange(period), r.uid, r.name, ROLE_RU[r.role as Role] ?? "", r.salary, r.work, r.bonus, r.total, r.paid ?? 0].map(quote).join(";"),
     );
     const csv = [header.map(quote).join(";"), ...lines].join("\r\n");
-    const ok = await sendDocument(uid, new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }), `qualifiers_${a}_${b}.csv`);
-    if (!ok) await send(uid, "Ошибка отправки CSV");
-    return;
-  }
-
-  if (text === "/me") {
-    const n = await q.approvedCount(uid, a, b);
-    await send(uid, `✅ Подтверждено: ${n}\nНачислено: ${rub(n * config.ratePerForm)}`);
-    return;
-  }
-
-  if (text.startsWith("/start") || text === "/app") {
-    await send(uid, "📊 Статистика и результаты", {
-      reply_markup: { inline_keyboard: [[{ text: "Открыть статистику", web_app: { url: config.publicUrl } }]] },
-    });
+    const ok = await sendDocument(uid, new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }), `vedomost_${period[0]}_${period[1]}.csv`);
+    if (!ok) await send(uid, "Ошибка отправки файла");
   }
 }
 
-async function handleReminderToggle(cq: NonNullable<TgUpdate["callback_query"]>) {
-  const on = await q.toggleReminders(cq.from.id, cq.from.first_name ?? "");
-  await api("answerCallbackQuery", { callback_query_id: cq.id, text: on ? "Напоминания включены" : "Напоминания выключены" });
-  if (cq.message) {
-    await api("editMessageText", {
-      chat_id: cq.message.chat.id,
-      message_id: cq.message.message_id,
-      text: remindersText(on),
-      reply_markup: remindersKeyboard(on),
-    });
+async function handleCallback(cq: NonNullable<TgUpdate["callback_query"]>) {
+  const data = cq.data ?? "";
+  const answer = (text: string) => api("answerCallbackQuery", { callback_query_id: cq.id, text });
+
+  const reg = data.match(/^reg:(ok|no):(\d+)$/);
+  if (reg) {
+    const level = await staff.adminLevel(cq.from);
+    if (!level) return void (await answer("Только для админов"));
+    const target = Number(reg[2]);
+    const approved = reg[1] === "ok";
+    const e = await staff.decide(target, approved, cq.from.id);
+    if (!e) return void (await answer("Заявка уже рассмотрена"));
+    await answer(approved ? "Одобрено" : "Отклонено");
+    if (cq.message) {
+      await api("editMessageText", {
+        chat_id: cq.message.chat.id,
+        message_id: cq.message.message_id,
+        text: `${approved ? "✅ Одобрено" : "❌ Отклонено"}: ${staff.displayName(e)}, ${ROLE_RU[e.role as Role] ?? ""}`,
+      });
+    }
+    await notify(target, approved
+      ? { kind: "registration", title: "Добро пожаловать в команду! Регистрация одобрена", body: "Теперь ваши отчёты засчитываются, а баланс виден в приложении." }
+      : { kind: "registration", title: "Регистрация не одобрена", body: "Если это ошибка — напишите админу." });
+    return;
+  }
+
+  // Совместимость с кнопкой напоминаний из v1
+  if (data === "toggle_reminder") {
+    await answer("Напоминания настраиваются в профиле приложения");
+  }
+}
+
+/** Сообщить админам о новой заявке на регистрацию */
+export async function announceRegistration(e: staff.Employee) {
+  const text = `Новая заявка: ${staff.displayName(e)}\nРоль: ${ROLE_RU[e.role as Role]}\nГород: ${e.city ?? "—"}\nТелефон: ${e.phone ?? "—"}${e.username ? `\n@${e.username}` : ""}`;
+  for (const admin of await staff.listAdmins()) {
+    if (!config.liveMode) continue;
+    await send(admin, text, {
+      reply_markup: { inline_keyboard: [[{ text: "✅ Одобрить", callback_data: `reg:ok:${e.uid}` }, { text: "❌ Отклонить", callback_data: `reg:no:${e.uid}` }]] },
+    }).catch(() => {});
   }
 }
