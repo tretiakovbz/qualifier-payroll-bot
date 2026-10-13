@@ -61,7 +61,8 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     const { migrate } = await import("../../src/db/migrate.ts");
     const { migrations } = await import("../../src/db/migrations.ts");
     await migrate(db, migrations.slice(0, 1));
-    await db`INSERT INTO employees(uid, name, can_dm) VALUES(7, 'Анна Смирнова', TRUE), (9, 'Мария', TRUE)`;
+    // 100 — владелец: писал боту в v1, но отчётов не сдавал — квалификатором стать не должен
+    await db`INSERT INTO employees(uid, name, can_dm) VALUES(7, 'Анна Смирнова', TRUE), (9, 'Мария', TRUE), (100, 'Босс', TRUE)`;
     await db`INSERT INTO reports(chat, msg, uid, name, n, day, status) VALUES
       (${GROUP}, 1, 7, 'Анна Смирнова', 4, '2026-10-06', 'approved'),
       (${GROUP}, 2, 7, 'Анна Смирнова', 3, '2026-10-07', 'pending'),
@@ -106,7 +107,7 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
 
   test("перенос v1: сотрудники стали квалификаторами, подтверждённые анкеты — начислениями", async () => {
     const e = await M.db`SELECT uid, role, status FROM employees ORDER BY uid`;
-    expect(e.map((r: any) => [Number(r.uid), r.role, r.status])).toEqual([[7, "qualifier", "active"], [9, "qualifier", "active"]]);
+    expect(e.map((r: any) => [Number(r.uid), r.role, r.status])).toEqual([[7, "qualifier", "active"], [9, "qualifier", "active"], [100, null, "new"]]);
     expect(await activeSum(7, "form")).toBe(2000); // 4 анкеты × 500, неподтверждённый не засчитан
     const maria = await M.db`SELECT period_start::text AS p FROM accruals WHERE uid = 9`;
     expect(maria[0].p).toBe("2026-09-20"); // 25 сентября → период 20.09–04.10
@@ -226,6 +227,7 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     expect(await activeSum(7, "salary")).toBe(10000);
     expect(await activeSum(9, "salary")).toBe(10000);
     expect(await activeSum(8, "salary")).toBe(0);
+    expect(await activeSum(100, "salary")).toBe(0); // владелец — не сотрудник
   });
 
   test("автобонус «лучший по анкетам»: порог и деление при ничьей", async () => {

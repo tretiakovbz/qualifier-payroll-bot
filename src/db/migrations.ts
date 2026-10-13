@@ -144,4 +144,21 @@ export const migrations: Migration[] = [
       );
     `,
   },
+  {
+    // Исправление 002: квалификаторами из v1 считаем только тех, у кого есть отчёты.
+    // Кто просто писал боту (например, админы), — «не зарегистрирован»; их оклад отменяется.
+    id: "003_v1_staff_only_with_reports",
+    sql: `
+      WITH demoted AS (
+        UPDATE employees e SET role = NULL, status = 'new', approved_at = NULL
+        WHERE e.role = 'qualifier' AND e.status = 'active'
+          AND e.registered_at IS NULL AND e.approved_by IS NULL
+          AND NOT EXISTS (SELECT 1 FROM reports r WHERE r.uid = e.uid)
+        RETURNING e.uid
+      )
+      UPDATE accruals a SET cancelled_at = now()
+      FROM demoted d
+      WHERE a.uid = d.uid AND a.kind = 'salary' AND a.cancelled_at IS NULL;
+    `,
+  },
 ];

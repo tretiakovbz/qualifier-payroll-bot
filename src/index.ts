@@ -11,6 +11,12 @@ const miniApp = Bun.file(new URL("./miniapp/index.html", import.meta.url));
 
 if (config.databaseUrl) {
   await migrate();
+  // Короткая сводка в лог: сколько кого и сколько начислено (без личных данных)
+  const { db } = await import("./db/client.ts");
+  const staff = await db`SELECT COALESCE(role, '—') AS role, status, COUNT(*)::int AS n FROM employees GROUP BY 1, 2 ORDER BY 1, 2`;
+  const money = await db`SELECT kind, COUNT(*)::int AS n, COALESCE(SUM(amount), 0)::int AS sum FROM accruals WHERE cancelled_at IS NULL GROUP BY kind ORDER BY kind`;
+  console.log("[start] staff", JSON.stringify(staff.map((r: any) => `${r.role}/${r.status}: ${r.n}`)));
+  console.log("[start] accruals", JSON.stringify(money.map((r: any) => `${r.kind}: ${r.n} шт, ${r.sum} ₽`)));
 } else {
   console.warn("[start] DATABASE_URL не задан — миграции пропущены");
 }
