@@ -196,4 +196,14 @@ export const migrations: Migration[] = [
       );
     `,
   },
+  {
+    // Запуск v2: все, кто сдавал отчёты через старого бота и ещё без роли, — действующие квалификаторы
+    id: "006_launch_activate_v1_reporters",
+    sql: `
+      UPDATE employees e SET role = 'qualifier', status = 'active', approved_at = now(),
+        full_name = COALESCE(NULLIF(e.full_name, ''), NULLIF(e.name, ''))
+      WHERE e.role IS NULL AND e.registered_at IS NULL
+        AND EXISTS (SELECT 1 FROM reports r WHERE r.uid = e.uid AND r.role = 'qualifier');
+    `,
+  },
 ];

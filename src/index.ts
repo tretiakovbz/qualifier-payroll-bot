@@ -6,6 +6,7 @@ import { handleUpdate } from "./bot/updates.ts";
 import { statsHandler, remindersHandler } from "./api/routes.ts";
 import { handleApiV2 } from "./api/v2.ts";
 import { startScheduler } from "./core/scheduler.ts";
+import { setupTelegram } from "./bot/setup.ts";
 
 const miniApp = Bun.file(new URL("./miniapp/index.html", import.meta.url));
 const adminJs = Bun.file(new URL("./miniapp/admin.js", import.meta.url));
@@ -66,4 +67,5 @@ export const server = Bun.serve({
 });
 
 startScheduler();
+if (config.liveMode || Bun.env.ROLLBACK_TO_V1 === "1") setupTelegram().catch((e) => console.error("[telegram] настройка не удалась", e));
 console.log(`[start] ${config.serviceName} ${config.version} on :${server.port}`);
