@@ -351,4 +351,75 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     expect((await fetch(`${base}/api/v2/stats/weekly?demo=1&role=recruiter`)).status).toBe(200);
     expect((await fetch(`${base}/api/v2/admin/overview?demo=1`)).status).toBe(401);
   });
+
+  test("акция-множитель ×2: доплата к отчёту и снятие вместе с ним", async () => {
+    const day = M.time.today();
+    const mgr = await api("/api/v2/admin/promos", { id: MANAGER, username: "approver1" }, { method: "POST", body: JSON.stringify({ name: "x", kind: "multiplier", multiplier: 2, starts_on: day, ends_on: day }) });
+    expect(mgr.status).toBe(403); // акции создаёт только владелец
+    const r = await api("/api/v2/admin/promos", { id: OWNER }, { method: "POST", body: JSON.stringify({ name: "Анкета ×2", kind: "multiplier", role: "qualifier", multiplier: 2, starts_on: day, ends_on: day }) });
+    expect(r.status).toBe(200);
+    await hook(groupMsg(MARIA, "#отчет\nОбработано недозвонов: 5\nАнкет собрано: 4"));
+    const id = msgId;
+    await hook(react({ id: OWNER }, id));
+    const rows = await M.db`SELECT kind, amount FROM accruals WHERE report_msg = ${id} AND cancelled_at IS NULL ORDER BY kind`;
+    expect(rows.map((x: any) => [x.kind, x.amount])).toEqual([["form", 2400], ["promo", 2400]]); // ставка 600 после смены настроек
+    await hook(react({ id: OWNER }, id, ""));
+    const after = await M.db`SELECT COUNT(*)::int AS n FROM accruals WHERE report_msg = ${id} AND cancelled_at IS NULL`;
+    expect(after[0].n).toBe(0);
+    const bad = await api("/api/v2/admin/promos", { id: OWNER }, { method: "POST", body: JSON.stringify({ name: "y", kind: "multiplier", multiplier: 1 }) });
+    expect(bad.status).toBe(400);
+  });
+
+  test("акция-порог и конкурс подводятся после окончания и не задваиваются", async () => {
+    M.promos = await import("../../src/core/promos.ts");
+    const owner = { id: OWNER };
+    await M.db`INSERT INTO reports(chat, msg, uid, name, n, day, status, role, metrics) VALUES
+      (${GROUP}, 9101, 7, 'Анна', 21, '2026-09-28', 'approved', 'qualifier', '{"forms":21}'),
+      (${GROUP}, 9102, 9, 'Мария', 21, '2026-09-29', 'approved', 'qualifier', '{"forms":21}')`;
+    await api("/api/v2/admin/promos", owner, { method: "POST", body: JSON.stringify({ name: "20 анкет", kind: "threshold", role: "qualifier", metric: "forms", threshold: 20, amount: 3000, period: "range", starts_on: "2026-09-27", ends_on: "2026-10-01" }) });
+    await api("/api/v2/admin/promos", owner, { method: "POST", body: JSON.stringify({ name: "Конкурс", kind: "contest", role: "qualifier", metric: "forms", threshold: 1, amount: 9000, starts_on: "2026-09-27", ends_on: "2026-10-01" }) });
+    const first = await M.promos.runDuePromos(M.time.today());
+    expect(first.map((x: any) => [x.promo, x.winners]).sort()).toEqual([["20 анкет", 2], ["Конкурс", 2]]);
+    const again = await M.promos.runDuePromos(M.time.today());
+    expect(again).toEqual([]);
+    const promo = await M.db`SELECT uid, amount, comment FROM accruals WHERE kind = 'promo' AND dedupe_key NOT LIKE '%:report:%' AND cancelled_at IS NULL ORDER BY comment, uid`;
+    expect(promo.map((x: any) => [Number(x.uid), x.amount])).toEqual([[7, 3000], [9, 3000], [7, 4500], [9, 4500]]);
+  });
+
+  test("сторис: видна своей роли, скрывается", async () => {
+    const day = M.time.today();
+    const st = await (await api("/api/v2/admin/stories", { id: OWNER }, { method: "POST", body: JSON.stringify({ title: "Новость для рекрутеров", role: "recruiter", starts_on: day, ends_on: day }) })).json();
+    expect((await (await api("/api/v2/me", IGOR)).json()).stories.map((s: any) => s.title)).toContain("Новость для рекрутеров");
+    expect((await (await api("/api/v2/me", ANNA)).json()).stories.map((s: any) => s.title)).not.toContain("Новость для рекрутеров");
+    await api(`/api/v2/admin/stories/${st.id}`, { id: OWNER }, { method: "DELETE" });
+    expect((await (await api("/api/v2/me", IGOR)).json()).stories.length).toBe(0);
+    const long = await api("/api/v2/admin/stories", { id: OWNER }, { method: "POST", body: JSON.stringify({ title: "x".repeat(41) }) });
+    expect(long.status).toBe(400);
+  });
+
+  test("карточка сотрудника и ведомость для админа", async () => {
+    const e = await (await api("/api/v2/admin/employees/8", { id: MANAGER, username: "approver1" })).json();
+    expect(e.role).toBe("recruiter");
+    expect(e.balance.accrued).toBe(210000);
+    expect(e.accruals.some((a: any) => a.cancelled)).toBe(true); // отменённое ручное начисление видно с пометкой
+    const ex = await (await api("/api/v2/admin/export", { id: MANAGER, username: "approver1" }, { method: "POST", body: "{}" })).json();
+    expect(ex.csv.split("\r\n")[0]).toContain("Сотрудник");
+    expect(ex.csv).toContain("Игорь Петров");
+    const an = await (await api("/api/v2/admin/analytics", { id: MANAGER, username: "approver1" })).json();
+    expect(an.periods.previous.label).toBeTruthy();
+    expect(Array.isArray(an.payrollPrev)).toBe(true);
+  });
+
+  test("владелец без регистрации видит кабинет, но не баланс", async () => {
+    const r = await (await api("/api/v2/me", { id: OWNER, first_name: "Босс" })).json();
+    expect(r.adminLevel).toBe("owner");
+    expect(r.balance).toBeUndefined();
+    expect((await api("/api/v2/admin/overview", { id: OWNER })).status).toBe(200);
+  });
+
+  test("админ-скрипт отдаётся", async () => {
+    const r = await fetch(`${base}/admin.js`);
+    expect(r.status).toBe(200);
+    expect(await r.text()).toContain("const Admin");
+  });
 });

@@ -11,6 +11,7 @@ import { reportAmount, type ReportMetrics, type Role } from "../lib/report.ts";
 import { getSettings } from "./settings.ts";
 import { listDirections } from "./directions.ts";
 import { notify } from "./notify.ts";
+import { applyMultipliers } from "./promos.ts";
 
 export type AccrualKind = "form" | "contract" | "salary" | "bonus" | "manual" | "promo";
 
@@ -80,7 +81,7 @@ export async function reconcileReports(opts: { notifyRecentDays?: number } = {})
     UPDATE accruals a SET cancelled_at = now()
     FROM reports r
     WHERE a.cancelled_at IS NULL AND a.report_chat = r.chat AND a.report_msg = r.msg
-      AND a.dedupe_key LIKE 'report:%' AND r.status <> 'approved'
+      AND (a.dedupe_key LIKE 'report:%' OR a.dedupe_key LIKE 'promo:%:report:%') AND r.status <> 'approved'
     RETURNING a.uid, a.amount, r.status`;
 
   const pending = await db`
@@ -113,10 +114,12 @@ export async function reconcileReports(opts: { notifyRecentDays?: number } = {})
       });
       if (!acc) continue;
       created++;
+      // Акции-множители («анкета ×2 в пятницу») — отдельным начислением, снимается вместе с отчётом
+      const extra = amount > 0 ? await applyMultipliers({ uid: Number(r.uid), role, day, base: amount, chat: Number(r.chat), msg: Number(r.msg) }) : 0;
       if (day >= since && amount > 0) {
         await notify(acc.uid, {
           kind: "approved",
-          title: `Отчёт подтверждён: +${rub(amount)}`,
+          title: `Отчёт подтверждён: +${rub(amount + extra)}`,
           body: role === "recruiter" ? `Контракты засчитаны, сумма уже на балансе` : `Анкеты засчитаны, сумма уже на балансе`,
           amount,
         });

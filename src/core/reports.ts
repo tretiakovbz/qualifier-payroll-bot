@@ -41,7 +41,7 @@ export async function setReportStatus(msg: number, status: ReportStatus, actor: 
 export async function listReports(opts: { status?: ReportStatus; role?: Role; limit?: number } = {}) {
   const rows = await db`
     SELECT r.msg, r.uid, r.day::text AS day, r.status, r.role, r.metrics, r.n, r.created_at,
-      COALESCE(e.full_name, r.name) AS name, e.photo_url,
+      COALESCE(e.full_name, r.name) AS name, e.photo_url, COALESCE(e.status, 'new') AS employee_status,
       a.amount AS accrued
     FROM reports r
     LEFT JOIN employees e ON e.uid = r.uid

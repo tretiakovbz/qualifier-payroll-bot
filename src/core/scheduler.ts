@@ -6,6 +6,7 @@ import { config } from "../config.ts";
 import { nowLocal, today } from "../lib/time.ts";
 import { reconcileReports, ensureSalary } from "./accruals.ts";
 import { runDueBonuses } from "./bonuses.ts";
+import { runDuePromos } from "./promos.ts";
 import { getSettings } from "./settings.ts";
 import { dm } from "./notify.ts";
 
@@ -24,8 +25,9 @@ export async function tick(nowMs = Date.now()) {
       const rec = await reconcileReports();
       const salary = await ensureSalary(today(nowMs));
       const bonuses = await runDueBonuses(nowMs);
-      if (rec.created || rec.cancelled || salary || bonuses.length) {
-        console.log("[scheduler]", JSON.stringify({ rec, salary, bonuses }));
+      const promos = await runDuePromos(today(nowMs));
+      if (rec.created || rec.cancelled || salary || bonuses.length || promos.length) {
+        console.log("[scheduler]", JSON.stringify({ rec, salary, bonuses, promos }));
       }
     }
     await sendReminders(nowMs);

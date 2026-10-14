@@ -14,6 +14,8 @@ import { listDirections, saveDirection } from "../core/directions.ts";
 import { listReports, setReportStatus, pendingCount } from "../core/reports.ts";
 import { listNotifications, markRead } from "../core/notify.ts";
 import { announceRegistration } from "../bot/updates.ts";
+import { listPromos, savePromo, listStories, saveStory, hideStory, PromoError } from "../core/promos.ts";
+import { sendDocument } from "../lib/telegram.ts";
 
 type Ctx = { req: Request; url: URL; user: TgUser; params: Record<string, string> };
 type Handler = (c: Ctx) => Promise<Response>;
@@ -68,6 +70,7 @@ const me: Handler = async ({ user, url }) => {
     streak,
     place: { place: place || null, of: rating.length, metric: mainMetric, week },
     goals: await bonusProgress(e.uid, e.role, day),
+    stories: (await listStories({ role: e.role, day })).map((x) => ({ id: "s" + x.id, title: x.title, body: x.body, big: x.big, style: x.style })),
     recent: (await recentAccruals(e.uid, 10)).map(accrualView),
     unread: (await db`SELECT COUNT(*)::int AS n FROM notifications WHERE uid = ${e.uid} AND read_at IS NULL`)[0].n,
   });
@@ -321,7 +324,11 @@ const adminAnalytics: Handler = async ({ url }) => {
     WHERE a.cancelled_at IS NULL AND a.day BETWEEN ${from} AND ${to}
     GROUP BY a.uid, e.full_name, e.name, e.role, a.kind`;
   out.money = money;
-  out.payroll = await payroll(periodOf(undefined, s.payoutDays));
+  const cur = periodOf(undefined, s.payoutDays);
+  const prev = periodBack(1, undefined, s.payoutDays);
+  out.payroll = await payroll(cur);
+  out.payrollPrev = await payroll(prev);
+  out.periods = { current: { period: cur, label: humanRange(cur), payoutDay: payoutDayOf(cur) }, previous: { period: prev, label: humanRange(prev), payoutDay: payoutDayOf(prev) } };
   return ok(out);
 };
 
@@ -331,6 +338,67 @@ const adminPayout: Handler = async ({ req, user }) => {
   const period = b.periodStart ? periodOf(b.periodStart, s.payoutDays) : periodBack(1, undefined, s.payoutDays);
   const sum = await markPaid(Number(b.uid), period, user.id, b.amount);
   return ok({ amount: sum, period });
+};
+
+const adminEmployee: Handler = async ({ params }) => {
+  const uid = Number(params.uid);
+  const e = await staff.getEmployee(uid);
+  if (!e) return fail(404, "Сотрудник не найден");
+  const s = await getSettings();
+  const cur = periodOf(undefined, s.payoutDays);
+  const prev = periodBack(1, undefined, s.payoutDays);
+  const accruals = await db`SELECT id, kind, amount, day::text AS day, comment, created_by, cancelled_at FROM accruals
+    WHERE uid = ${uid} ORDER BY day DESC, id DESC LIMIT 60`;
+  return ok({
+    uid, name: staff.displayName(e), username: e.username, photoUrl: e.photo_url, role: e.role, status: e.status,
+    phone: e.phone, city: e.city, adminLevel: staff.adminLevelOf(e), registeredAt: e.registered_at, approvedAt: e.approved_at,
+    balance: { ...(await balanceOf(uid, cur)), label: humanRange(cur) },
+    previous: { ...(await balanceOf(uid, prev)), label: humanRange(prev) },
+    accruals: accruals.map((a: any) => ({ ...a, id: Number(a.id), cancelled: Boolean(a.cancelled_at) })),
+  });
+};
+
+const adminPromosGet: Handler = async () => ok({ promos: await listPromos(), stories: await listStories({ all: true }) });
+
+const adminPromoSave: Handler = async ({ req, user }) => {
+  try {
+    return ok(await savePromo(await body(req), user.id));
+  } catch (e) {
+    if (e instanceof PromoError) return fail(400, e.message);
+    throw e;
+  }
+};
+
+const adminStorySave: Handler = async ({ req, user }) => {
+  try {
+    return ok(await saveStory(await body(req), user.id));
+  } catch (e) {
+    if (e instanceof PromoError) return fail(400, e.message);
+    throw e;
+  }
+};
+
+const adminStoryHide: Handler = async ({ user, params }) => {
+  await hideStory(Number(params.id), user.id);
+  return ok({ ok: true });
+};
+
+const ROLE_RU: Record<string, string> = { qualifier: "квалификатор", recruiter: "рекрутер" };
+
+/** Ведомость CSV: возвращается в ответе и, в боевом режиме, приходит файлом в личку */
+const adminExport: Handler = async ({ req, user }) => {
+  const b = await body<{ periodStart?: string }>(req);
+  const s = await getSettings();
+  const period = b.periodStart ? periodOf(b.periodStart, s.payoutDays) : periodOf(undefined, s.payoutDays);
+  const rows = await payroll(period);
+  const quote = (x: unknown) => '"' + String(x ?? "").replaceAll('"', '""') + '"';
+  const header = ["Период", "Telegram ID", "Сотрудник", "Роль", "Оклад ₽", "Анкеты/контракты ₽", "Бонусы и акции ₽", "Начислено ₽", "Выплачено ₽"];
+  const lines = rows.map((r: any) => [humanRange(period), r.uid, r.name, ROLE_RU[r.role] ?? "", r.salary, r.work, r.bonus, r.total, r.paid ?? 0].map(quote).join(";"));
+  const csv = [header.map(quote).join(";"), ...lines].join("\r\n");
+  const filename = `vedomost_${period[0]}_${period[1]}.csv`;
+  let sent = false;
+  if (config.liveMode) sent = await sendDocument(user.id, new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" }), filename).catch(() => false);
+  return ok({ filename, csv, sent });
 };
 
 // ───────────── Демо-данные ─────────────
@@ -397,6 +465,12 @@ const routes: [string, string, Handler][] = [
   ["POST", "/api/v2/admin/manual/:id", admin("manager", adminManualSet)],
   ["GET", "/api/v2/admin/analytics", admin("manager", adminAnalytics)],
   ["POST", "/api/v2/admin/payouts", admin("manager", adminPayout)],
+  ["GET", "/api/v2/admin/employees/:uid", admin("manager", adminEmployee)],
+  ["GET", "/api/v2/admin/promos", admin("manager", adminPromosGet)],
+  ["POST", "/api/v2/admin/promos", admin("owner", adminPromoSave)],
+  ["POST", "/api/v2/admin/stories", admin("owner", adminStorySave)],
+  ["DELETE", "/api/v2/admin/stories/:id", admin("owner", adminStoryHide)],
+  ["POST", "/api/v2/admin/export", admin("manager", adminExport)],
 ];
 
 function match(pattern: string, path: string): Record<string, string> | null {

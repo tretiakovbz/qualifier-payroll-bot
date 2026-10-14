@@ -161,4 +161,29 @@ export const migrations: Migration[] = [
       WHERE a.uid = d.uid AND a.kind = 'salary' AND a.cancelled_at IS NULL;
     `,
   },
+  {
+    // Акции (множитель, порог, конкурс, новость) и сторис, которые создаёт админ
+    id: "004_promos_stories",
+    sql: `
+      CREATE TABLE IF NOT EXISTS promotions(
+        id SERIAL PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'all', metric TEXT,
+        multiplier NUMERIC(6,2), threshold INTEGER, amount INTEGER,
+        period TEXT NOT NULL DEFAULT 'range', weekdays JSONB NOT NULL DEFAULT '[]',
+        starts_on DATE NOT NULL, ends_on DATE NOT NULL,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE, split_ties BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS promo_runs(
+        promo_id INTEGER NOT NULL, period_key TEXT NOT NULL, ran_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        winners JSONB NOT NULL DEFAULT '[]', PRIMARY KEY(promo_id, period_key)
+      );
+      CREATE TABLE IF NOT EXISTS stories(
+        id SERIAL PRIMARY KEY, title TEXT NOT NULL, body TEXT, big TEXT,
+        style TEXT NOT NULL DEFAULT 'accent', role TEXT NOT NULL DEFAULT 'all',
+        promo_id INTEGER, starts_on DATE NOT NULL, ends_on DATE NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE, created_by BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `,
+  },
 ];

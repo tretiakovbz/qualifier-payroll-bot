@@ -189,6 +189,7 @@ const I = {
   gift: '<rect x="3" y="8" width="18" height="13" rx="2"/><path d="M12 8v13"/><path d="M3 12h18"/><path d="M12 8c-2-4-6-4-6-1.5S9 8 12 8c3 0 6-.5 6-1.5S14 4 12 8z"/>',
   check: '<path d="M5 12l5 5 9-10"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+  shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
   palette: '<circle cx="12" cy="12" r="9"/><circle cx="8" cy="10" r="1.2"/><circle cx="12" cy="7.5" r="1.2"/><circle cx="16" cy="10" r="1.2"/><path d="M12 21a3 3 0 0 1 0-6h2a3 3 0 0 0 3-3"/>',
 };
 const ico = (name, size = 20, w = 2) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${I[name]}</svg>`;
@@ -276,7 +277,13 @@ function avatar(size) {
 }
 
 // ───────── навигация ─────────
-const TABS = [["#/home", "Главная", "home"], ["#/stats", "Статистика", "stats"], ["#/profile", "Профиль", "user"]];
+const TABS_BASE = [["#/home", "Главная", "home"], ["#/stats", "Статистика", "stats"], ["#/profile", "Профиль", "user"]];
+let TABS = TABS_BASE;
+function computeTabs() {
+  const registered = S.me && S.me.status === "active" && S.me.role;
+  const admin = S.me && S.me.adminLevel;
+  TABS = [...(registered ? TABS_BASE : []), ...(admin ? [["#/admin", "Админ", "shield"]] : [])];
+}
 function renderTabs(active) {
   $("#tabs").innerHTML = TABS.map(([href, name, icon]) => `<a href="${href}" ${href === active ? 'aria-current="page"' : ""}>${ico(icon, 26, href === active ? 2.4 : 2)}${name}</a>`).join("");
 }
@@ -296,6 +303,15 @@ async function router() {
   const me = S.me;
   if (!me) return;
   const registered = me.status === "active" && me.role;
+  computeTabs();
+  if (me.adminLevel && hash.startsWith("#/admin")) {
+    renderTabs(hash.split("?")[0] === "#/admin" ? "#/admin" : "#/admin");
+    document.body.classList.toggle("no-nav", TABS.length < 2);
+    setBack(hash.split("?")[0] !== "#/admin");
+    try { await Admin.render(hash); if (TABS.length < 2) document.body.classList.add("no-nav"); } catch (e) { view(`<div class="card"><h3>Не получилось загрузить</h3><p class="muted">${esc(e.message)}</p><button class="btn" onclick="location.reload()">Обновить</button></div>`); }
+    return;
+  }
+  if (!registered && me.adminLevel && hash !== "#/register") { location.hash = "#/admin"; return; }
   if (!registered && hash !== "#/register") {
     if (me.registered || (me.status === "pending" && me.role)) return renderPending();
     return renderRegister();
@@ -675,5 +691,6 @@ async function greetNotifications() {
   }
 })();
 </script>
+<script src="/admin.js"></script>
 </body>
 </html>

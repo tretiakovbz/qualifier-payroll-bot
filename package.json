@@ -1,6 +1,6 @@
 {
   "name": "qualifier-payroll-bot",
-  "version": "2.0.0-stage4",
+  "version": "2.0.0-stage5",
   "private": true,
   "type": "module",
   "description": "@sqlhunter_bot — рейтинг и зарплата квалификаторов и рекрутеров",

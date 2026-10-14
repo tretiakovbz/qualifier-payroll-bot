@@ -8,6 +8,7 @@ import { handleApiV2 } from "./api/v2.ts";
 import { startScheduler } from "./core/scheduler.ts";
 
 const miniApp = Bun.file(new URL("./miniapp/index.html", import.meta.url));
+const adminJs = Bun.file(new URL("./miniapp/admin.js", import.meta.url));
 
 if (config.databaseUrl) {
   await migrate();
@@ -34,6 +35,10 @@ export const server = Bun.serve({
       return new Response(miniApp, {
         headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
       });
+    }
+
+    if (url.pathname === "/admin.js" && req.method === "GET") {
+      return new Response(adminJs, { headers: { "content-type": "text/javascript;charset=utf-8", "cache-control": "no-store" } });
     }
 
     const v2 = await handleApiV2(req, url);

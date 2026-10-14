@@ -17,7 +17,7 @@ function list(name: string): string[] {
 
 export const config = {
   serviceName: env.SERVICE_NAME ?? "qualifier-bot",
-  version: "2.0.0-stage4",
+  version: "2.0.0-stage5",
   port: num("PORT", 3000),
 
   botToken: env.BOT_TOKEN ?? "",
