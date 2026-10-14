@@ -14,6 +14,7 @@ import { listDirections, saveDirection } from "../core/directions.ts";
 import { listReports, setReportStatus, pendingCount } from "../core/reports.ts";
 import { listNotifications, markRead } from "../core/notify.ts";
 import { announceRegistration } from "../bot/updates.ts";
+import { checkAchievements, recordsOf, streaks, DEFS } from "../core/achievements.ts";
 import { listPromos, savePromo, listStories, saveStory, hideStory, PromoError } from "../core/promos.ts";
 import { sendDocument } from "../lib/telegram.ts";
 
@@ -72,32 +73,29 @@ const me: Handler = async ({ user, url }) => {
     goals: await bonusProgress(e.uid, e.role, day),
     stories: (await listStories({ role: e.role, day })).map((x) => ({ id: "s" + x.id, title: x.title, body: x.body, big: x.big, style: x.style })),
     recent: (await recentAccruals(e.uid, 10)).map(accrualView),
+    achievements: await (async () => { const a = await checkAchievements(e.uid, e.role!); return { earned: a.items.filter((x) => x.done).length, total: a.items.length }; })(),
     unread: (await db`SELECT COUNT(*)::int AS n FROM notifications WHERE uid = ${e.uid} AND read_at IS NULL`)[0].n,
   });
+};
+
+const achievements: Handler = async ({ user, url }) => {
+  if (url.searchParams.get("demo") === "1") return ok(demoAchievements());
+  const e = await staff.getEmployee(user.id);
+  if (!e || e.status !== "active" || !e.role) return fail(403, "Достижения появятся после одобрения регистрации");
+  const a = await checkAchievements(e.uid, e.role);
+  return ok({ items: a.items, earned: a.items.filter((x) => x.done).length, total: a.items.length, records: await recordsOf(e.uid, e.role, a.daily), streak: a.stats.streak, bestStreak: a.stats.bestStreak });
 };
 
 function accrualView(a: any) {
   return { id: Number(a.id), kind: a.kind, amount: a.amount, day: typeof a.day === "string" ? a.day : new Date(a.day).toISOString().slice(0, 10), comment: a.comment };
 }
 
-/** Серия: подряд рабочих дней с отчётом, считая назад от сегодня (или вчера, если сегодня ещё не отчитался) */
+/** Серия: подряд рабочих дней с отчётом (сегодня или вчера — последний) */
 async function streakOf(uid: number, day: string): Promise<number> {
   const s = await getSettings();
   const rows = await db`SELECT DISTINCT day::text AS day FROM reports WHERE uid = ${uid} AND chat = ${config.groupId}
-    AND day > ${addDays(day, -120)} ORDER BY day DESC`;
-  const have = new Set(rows.map((r: any) => r.day));
-  const workday = (d: string) => {
-    const dow = new Date(d + "T00:00:00Z").getUTCDay();
-    return ((dow - s.week.startDow + 7) % 7) < s.week.days;
-  };
-  let d = have.has(day) ? day : addDays(day, -1);
-  let n = 0;
-  for (let i = 0; i < 120; i++, d = addDays(d, -1)) {
-    if (!workday(d)) continue;
-    if (!have.has(d)) break;
-    n++;
-  }
-  return n;
+    AND day > ${addDays(day, -400)}`;
+  return streaks(rows.map((r: any) => r.day), day, s.week).current;
 }
 
 const register: Handler = async ({ req, user }) => {
@@ -419,8 +417,20 @@ function demoMe() {
       { id: 2, kind: "form", amount: 1500, day: addDays(day, -2), comment: "анкет: 3" },
       { id: 1, kind: "salary", amount: 10000, day: period[0], comment: "оклад, половина месяца" },
     ],
+    achievements: { earned: 6, total: 12 },
     unread: 1,
   };
+}
+
+function demoAchievements() {
+  const done = new Set(["first_report", "streak_5", "first_bonus", "champion", "forms_100", "day_10"]);
+  const progress: Record<string, number> = { streak_20: 9, champion_3: 1, forms_500: 214, forms_1000: 214, week_30: 24, calls_1000: 860 };
+  const items = DEFS.filter((d) => d.role === "all" || d.role === "qualifier").map((d) => ({
+    code: d.code, title: d.title, desc: d.desc, icon: d.icon, tier: d.tier, target: d.target,
+    value: done.has(d.code) ? d.target : progress[d.code] ?? 0, done: done.has(d.code), earnedAt: done.has(d.code) ? "2026-10-01T10:00:00Z" : null,
+  }));
+  return { demo: true, items, earned: done.size, total: items.length, streak: 9, bestStreak: 12,
+    records: { metric: "forms", bestDay: { value: 11, label: "3 октября" }, bestWeek: { value: 24, label: "11–15 октября" }, bestPeriod: { amount: 31500, label: "20 сентября – 4 октября" }, thisWeek: 24 } };
 }
 
 function demoWeekly(role: Role, metric: Metric, weeks: number) {
@@ -446,6 +456,7 @@ const routes: [string, string, Handler][] = [
   ["POST", "/api/v2/me/prefs", prefs],
   ["GET", "/api/v2/stats/weekly", weekly],
   ["GET", "/api/v2/me/accruals", accrualsList],
+  ["GET", "/api/v2/me/achievements", achievements],
   ["GET", "/api/v2/notifications", notifications],
   ["POST", "/api/v2/notifications/read", notifications],
 
@@ -491,7 +502,7 @@ export async function handleApiV2(req: Request, url: URL): Promise<Response | nu
     if (method !== req.method) continue;
     const params = match(pattern, url.pathname);
     if (!params) continue;
-    const isDemo = url.searchParams.get("demo") === "1" && req.method === "GET" && (pattern === "/api/v2/me" || pattern === "/api/v2/stats/weekly");
+    const isDemo = url.searchParams.get("demo") === "1" && req.method === "GET" && (pattern === "/api/v2/me" || pattern === "/api/v2/stats/weekly" || pattern === "/api/v2/me/achievements");
     const user = verifyInitData(req.headers.get("X-Telegram-Init-Data") ?? "") ?? (isDemo ? demoUser() : null);
     if (!user) return fail(401, "Откройте приложение из Telegram");
     try {

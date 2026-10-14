@@ -127,6 +127,16 @@ label.field input,select.input{height:50px;border-radius:14px;border:1px solid v
 [data-theme="funny"] .balance-card .muted{color:rgba(42,27,92,.75)}
 [data-theme="funny"] .balance-card .chip-tile{background:rgba(255,255,255,.35)}
 
+.badges{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.badge{background:var(--card);border-radius:20px;padding:14px 8px 12px;display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center}
+.badge .disc{width:62px;height:62px;border-radius:50%;display:grid;place-items:center;color:#1a1405;position:relative}
+.badge.locked .disc{background:var(--card2)!important;color:var(--faint)}
+.badge b{font-size:13px;line-height:1.2}
+.badge .bar{height:5px;width:80%}
+.celebrate{position:fixed;inset:0;z-index:60;background:rgba(5,7,15,.86);display:flex;align-items:center;justify-content:center;padding:24px}
+.celebrate .box{background:var(--card);border-radius:32px;padding:28px 22px 22px;max-width:360px;width:100%;display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;animation:pop .55s cubic-bezier(.2,1.4,.3,1)}
+.celebrate .glow{margin:8px 0 18px;width:112px;height:112px;border-radius:50%;display:grid;place-items:center;background:radial-gradient(circle,var(--gold) 0 54%,transparent 55%);box-shadow:0 0 0 10px rgba(255,194,75,.14),0 0 0 22px rgba(255,194,75,.07);color:#1a1405}
+@keyframes pop{from{transform:scale(.6);opacity:0}to{transform:none;opacity:1}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -189,6 +199,7 @@ const I = {
   gift: '<rect x="3" y="8" width="18" height="13" rx="2"/><path d="M12 8v13"/><path d="M3 12h18"/><path d="M12 8c-2-4-6-4-6-1.5S9 8 12 8c3 0 6-.5 6-1.5S14 4 12 8z"/>',
   check: '<path d="M5 12l5 5 9-10"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+  star: '<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/>',
   shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
   palette: '<circle cx="12" cy="12" r="9"/><circle cx="8" cy="10" r="1.2"/><circle cx="12" cy="7.5" r="1.2"/><circle cx="16" cy="10" r="1.2"/><path d="M12 21a3 3 0 0 1 0-6h2a3 3 0 0 0 3-3"/>',
 };
@@ -318,7 +329,7 @@ async function router() {
   }
   const routes = {
     "#/home": renderHome, "#/stats": renderStats, "#/profile": renderProfile,
-    "#/profile/settings": renderSettings, "#/profile/money": renderMoney, "#/help": renderHelp, "#/register": registered ? renderHome : renderRegister,
+    "#/profile/settings": renderSettings, "#/profile/money": renderMoney, "#/profile/achievements": renderAchievements, "#/help": renderHelp, "#/register": registered ? renderHome : renderRegister,
   };
   const fn = routes[hash] || renderHome;
   const isTab = TABS.some(([h]) => h === hash);
@@ -510,7 +521,7 @@ async function renderProfile() {
       <div class="small muted">${me.role === "recruiter" ? "Рекрутер" : "Квалификатор"}${joined ? ` · в команде с ${joined}` : ""}</div>
     </div>
     <div class="grid2">
-      <button class="card" style="text-align:left;display:flex;flex-direction:column;gap:10px" data-go="#/stats"><span style="color:var(--warn)">${ico("flame", 26)}</span><b>Серия ${me.streak} ${plural(me.streak, "день", "дня", "дней")}</b><span class="small muted">отчёты без пропусков</span></button>
+      <button class="card" style="text-align:left;display:flex;flex-direction:column;gap:10px" data-go="#/profile/achievements"><span style="display:flex;gap:4px"><span style="width:28px;height:28px;border-radius:9px;background:var(--gold);display:grid;place-items:center;color:#1a1405">${ico("medal", 16, 2.4)}</span><span style="width:28px;height:28px;border-radius:9px;background:var(--warn);display:grid;place-items:center;color:#1a1405">${ico("flame", 16, 2.4)}</span><span style="width:28px;height:28px;border-radius:9px;background:var(--good);display:grid;place-items:center;color:#0a1a12">${ico("star", 16, 2.4)}</span></span><b>Достижения</b><span class="small muted">${me.achievements ? `${me.achievements.earned} из ${me.achievements.total} открыто` : "Значки и рекорды"}</span></button>
       <button class="card" style="text-align:left;display:flex;flex-direction:column;gap:10px" data-go="#/profile/money"><span class="ico">${ico("cash")}</span><b>Мои деньги</b><span class="small muted">Начисления и выплаты</span></button>
     </div>
     <div class="small muted" style="padding:0 4px">Тема оформления</div>
@@ -584,7 +595,7 @@ async function renderMoney() {
   const unread = (notes || []).filter((x) => !x.read_at);
   view(`
     <h1>Мои деньги</h1>
-    ${unread.length ? `<div class="small muted" style="padding:0 4px">Новое</div><div class="list">${unread.slice(0, 5).map((x) => `<div class="item"><span class="ico">${ico(x.kind === "bonus" ? "gift" : x.kind === "payout" ? "cash" : "check")}</span><div class="grow"><div style="font-weight:600">${esc(x.title)}</div>${x.body ? `<div class="tiny muted">${esc(x.body)}</div>` : ""}</div></div>`).join("")}</div>` : ""}
+    ${unread.length ? `<div class="small muted" style="padding:0 4px">Новое</div><div class="list">${unread.slice(0, 5).map((x) => `<div class="item"><span class="ico">${ico(x.kind === "bonus" ? "gift" : x.kind === "achievement" ? "medal" : x.kind === "payout" ? "cash" : "check")}</span><div class="grow"><div style="font-weight:600">${esc(x.title)}</div>${x.body ? `<div class="tiny muted">${esc(x.body)}</div>` : ""}</div></div>`).join("")}</div>` : ""}
     <div class="small muted" style="padding:0 4px">По расчётным периодам</div>
     <div class="list">${money.history.map((h) => `
       <div class="item"><div class="grow"><div style="font-weight:600">${esc(h.label)}</div><div class="tiny muted">${h.paid !== null && h.paid !== undefined ? `Выплачено ${human(h.payoutDay)}` : `Выплата ${human(h.payoutDay)}`}</div></div>
@@ -597,6 +608,55 @@ async function renderMoney() {
 function demoMoney() {
   const r = S.me.recent;
   return { history: [{ label: S.me.balance.periodLabel, accrued: S.me.balance.accrued, paid: null, payoutDay: S.me.payout.day }, { label: "20 сентября – 4 октября", accrued: 31500, paid: 31500, payoutDay: "2026-10-05" }], items: r };
+}
+
+// ───────── Достижения ─────────
+const TIER = { bronze: "#D9925B", silver: "#C9D1E4", gold: "var(--gold)" };
+async function renderAchievements() {
+  view(`<h1>Достижения</h1><div class="empty">Загружаем…</div>`);
+  const d = await api("/api/v2/me/achievements");
+  const r = d.records, word = r.metric === "contracts" ? ["контракт", "контракта", "контрактов"] : ["анкета", "анкеты", "анкет"];
+  const items = [...d.items].sort((a, b) => (b.done - a.done) || (b.value / b.target - a.value / a.target));
+  view(`
+    <div class="between"><h1>Достижения</h1><span class="num" style="font-size:20px;color:var(--gold)">${d.earned} из ${d.total}</span></div>
+    <div class="bar"><i data-w="${Math.round((d.earned / d.total) * 100)}" style="background:var(--gold)"></i></div>
+    <div class="small muted" style="padding:0 4px">Личные рекорды</div>
+    <div class="grid2">
+      <div class="card"><div class="tiny muted">Лучшая неделя</div><div class="num" style="font-size:24px;margin:6px 0 2px">${r.bestWeek.value} <span style="font-size:14px;font-weight:600">${plural(r.bestWeek.value, ...word)}</span></div><div class="tiny muted">${r.bestWeek.label ? esc(r.bestWeek.label) : "ещё впереди"}</div>${r.thisWeek > 0 && r.thisWeek >= r.bestWeek.value ? '<span class="pill" style="margin-top:8px;white-space:nowrap">это рекорд</span>' : ""}</div>
+      <div class="card"><div class="tiny muted">Лучший день</div><div class="num" style="font-size:24px;margin:6px 0 2px">${r.bestDay.value} <span style="font-size:14px;font-weight:600">${plural(r.bestDay.value, ...word)}</span></div><div class="tiny muted">${r.bestDay.label ? esc(r.bestDay.label) : "ещё впереди"}</div></div>
+      <div class="card"><div class="tiny muted">Самая большая выплата</div><div class="num" style="font-size:22px;margin:6px 0 2px">${rub(r.bestPeriod.amount)}</div><div class="tiny muted">${r.bestPeriod.label ? esc(r.bestPeriod.label) : "ещё впереди"}</div></div>
+      <div class="card"><div class="tiny muted">Лучшая серия</div><div class="num" style="font-size:24px;margin:6px 0 2px">${d.bestStreak} <span style="font-size:14px;font-weight:600">${plural(d.bestStreak, "день", "дня", "дней")}</span></div><div class="tiny muted">сейчас ${d.streak}</div></div>
+    </div>
+    <div class="small muted" style="padding:0 4px">Значки</div>
+    <div class="badges">${items.map((a) => `<button class="badge ${a.done ? "" : "locked"}" data-badge="${esc(a.code)}" aria-label="${esc(a.title)}${a.done ? ", получено" : ""}">
+      <span class="disc" style="background:${TIER[a.tier]}">${ico(a.icon, 28, 2.2)}</span><b>${esc(a.title)}</b>
+      ${a.done ? `<span class="tiny muted">${a.earnedAt ? human(new Date(a.earnedAt).toISOString().slice(0, 10)) : "получено"}</span>` : `<span class="bar"><i data-w="${Math.round((a.value / a.target) * 100)}"></i></span><span class="tiny muted">${a.value} / ${a.target}</span>`}
+    </button>`).join("")}</div>
+  `);
+  document.querySelectorAll("[data-badge]").forEach((b) => (b.onclick = () => {
+    const a = d.items.find((x) => x.code === b.dataset.badge); haptic();
+    toast(a.title, a.done ? a.desc + " — получено" : `${a.desc}. Сейчас ${a.value} из ${a.target}`, a.done ? "bonus" : "check");
+  }));
+  growBars();
+}
+
+/** Полноэкранное поздравление: бонус или новое достижение */
+function celebrate(n) {
+  return new Promise((resolve) => {
+    const isBonus = n.kind === "bonus";
+    const el = document.createElement("div"); el.className = "celebrate"; el.setAttribute("role", "dialog"); el.setAttribute("aria-label", n.title);
+    // «Поздравляем! Лучший по анкетам недели: +5 000 ₽» → «Лучший по анкетам недели»: сумма и поздравление показаны отдельно
+    const title = n.title.replace(/^Новое достижение: /, "").replace(/^Поздравляем!\s*/, "").replace(/:\s*\+[\d\s\u00a0]+₽$/, "");
+    el.innerHTML = `<div class="box"><div class="glow">${ico(isBonus ? "trophy" : "medal", 52, 2)}</div>
+      <div class="small muted">${isBonus ? "Поздравляем!" : "Новое достижение"}</div>
+      <h2 style="font-size:22px">${esc(title)}</h2>
+      ${n.amount ? `<div class="num" style="font-size:36px;color:var(--good)">+${rub(n.amount)}</div>` : ""}
+      ${n.body ? `<p class="muted" style="margin:0">${esc(n.body)}</p>` : ""}
+      <button class="btn" style="margin-top:8px">${isBonus ? "Забрать" : "Отлично!"}</button></div>`;
+    document.body.appendChild(el);
+    confetti(); playNotes(SOUND.fanfare); haptic("success");
+    el.querySelector("button").onclick = () => { el.remove(); resolve(); };
+  });
 }
 
 // ───────── Помощь ─────────
@@ -669,11 +729,15 @@ async function greetNotifications() {
   try {
     const notes = (await api("/api/v2/notifications")).filter((n) => !n.read_at);
     if (!notes.length) return;
-    const top = notes.find((n) => n.kind === "bonus") || notes[0];
-    const more = notes.length > 1 ? ` · ещё ${notes.length - 1}` : "";
-    toast(top.title, (top.body || "") + more, top.kind);
-    if (top.kind === "bonus") { playNotes(SOUND.fanfare); confetti(); haptic("success"); }
-    else if (top.amount > 0) { playNotes(SOUND.coin); haptic("success"); }
+    const big = notes.filter((n) => n.kind === "bonus" || n.kind === "achievement").slice(0, 3);
+    for (const n of big) await celebrate(n);
+    const rest = notes.filter((n) => !big.includes(n));
+    if (rest.length) {
+      const top = rest[0], more = rest.length > 1 ? ` · ещё ${rest.length - 1}` : "";
+      toast(top.title, (top.body || "") + more, top.kind);
+      if (top.amount > 0) { playNotes(SOUND.coin); haptic("success"); }
+    }
+    if (big.length) api("/api/v2/notifications/read", { method: "POST" }).then(() => { S.me.unread = 0; document.querySelectorAll(".dot").forEach((d) => d.remove()); }).catch(() => {});
   } catch (e) {}
 }
 

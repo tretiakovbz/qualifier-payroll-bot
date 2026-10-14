@@ -140,7 +140,7 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     await hook(react({ id: MANAGER, username: "Approver1" }, id));
     expect(await activeSum(7, "form")).toBe(4500);
     expect(lastText(7)).toContain("2 500");
-    const n = await M.db`SELECT title FROM notifications WHERE uid = 7`;
+    const n = await M.db`SELECT title FROM notifications WHERE uid = 7 AND kind = 'approved'`;
     expect(n.length).toBe(1);
   });
 
@@ -421,5 +421,23 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     const r = await fetch(`${base}/admin.js`);
     expect(r.status).toBe(200);
     expect(await r.text()).toContain("const Admin");
+  });
+
+  test("достижения: выдаются один раз, с праздничным уведомлением в приложении", async () => {
+    const r = await (await api("/api/v2/me/achievements", ANNA)).json();
+    expect(r.total).toBe(12);
+    const first = r.items.find((x: any) => x.code === "first_report");
+    expect(first.done).toBe(true);
+    expect(r.items.find((x: any) => x.code === "contract_1")).toBeUndefined(); // чужая роль
+    expect(r.records.bestWeek.value).toBeGreaterThan(0);
+    await api("/api/v2/me/achievements", ANNA);
+    const n = await M.db`SELECT COUNT(*)::int AS n FROM notifications WHERE uid = 7 AND kind = 'achievement' AND title LIKE '%Первый отчёт%'`;
+    expect(n[0].n).toBe(1);
+    const dm = await M.db`SELECT COUNT(*)::int AS n FROM achievements_earned WHERE uid = 7 AND code = 'first_report'`;
+    expect(dm[0].n).toBe(1);
+    const rec = await (await api("/api/v2/me/achievements", IGOR)).json();
+    expect(rec.items.find((x: any) => x.code === "contract_1").done).toBe(true);
+    const me = await (await api("/api/v2/me", ANNA)).json();
+    expect(me.achievements.total).toBe(12);
   });
 });

@@ -186,4 +186,14 @@ export const migrations: Migration[] = [
       );
     `,
   },
+  {
+    // Полученные достижения: запоминаются навсегда, поздравление — один раз
+    id: "005_achievements",
+    sql: `
+      CREATE TABLE IF NOT EXISTS achievements_earned(
+        uid BIGINT NOT NULL, code TEXT NOT NULL, earned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY(uid, code)
+      );
+    `,
+  },
 ];

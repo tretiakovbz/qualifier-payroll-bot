@@ -126,6 +126,16 @@ export async function reconcileReports(opts: { notifyRecentDays?: number } = {})
       }
     }
   }
+  // Достижения пересчитываются у тех, кому что-то начислили
+  if (created) {
+    const { checkAchievements } = await import("./achievements.ts");
+    const touched = new Map<number, Role>();
+    for (const r of pending) touched.set(Number(r.uid), (r.role ?? "qualifier") as Role);
+    for (const [uid, role] of touched) {
+      const e = await db`SELECT status, role FROM employees WHERE uid = ${uid}`;
+      if (e[0]?.status === "active" && e[0]?.role === role) await checkAchievements(uid, role).catch((err) => console.error("[achievements]", err));
+    }
+  }
   return { created, cancelled: cancelled.length };
 }
 

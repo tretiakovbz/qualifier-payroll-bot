@@ -6,7 +6,7 @@ import { config } from "../config.ts";
 import { send } from "../lib/telegram.ts";
 import { getEmployee, type Prefs } from "./employees.ts";
 
-export type NotifyKind = "approved" | "rejected" | "bonus" | "payout" | "promo" | "reminder" | "registration" | "system";
+export type NotifyKind = "approved" | "rejected" | "bonus" | "payout" | "promo" | "reminder" | "registration" | "achievement" | "system";
 
 /** Какие виды можно выключить в настройках профиля */
 const PREF_KEY: Partial<Record<NotifyKind, keyof NonNullable<Prefs["notify"]>>> = {
