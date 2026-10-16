@@ -7,12 +7,17 @@ import { statsHandler, remindersHandler } from "./api/routes.ts";
 import { handleApiV2 } from "./api/v2.ts";
 import { startScheduler } from "./core/scheduler.ts";
 import { setupTelegram } from "./bot/setup.ts";
+import { ensureDatabase, cloneData } from "./db/clone.ts";
+import { api } from "./lib/telegram.ts";
 
 const miniApp = Bun.file(new URL("./miniapp/index.html", import.meta.url));
 const adminJs = Bun.file(new URL("./miniapp/admin.js", import.meta.url));
 
+const cloneFrom = Bun.env.CLONE_FROM_DATABASE_URL ?? "";
 if (config.databaseUrl) {
+  if (cloneFrom) await ensureDatabase(config.databaseUrl, cloneFrom);
   await migrate();
+  if (cloneFrom) await cloneData((await import("./db/client.ts")).db, cloneFrom);
   // Короткая сводка в лог: сколько кого и сколько начислено (без личных данных)
   const { db } = await import("./db/client.ts");
   const staff = await db`SELECT COALESCE(role, '—') AS role, status, COUNT(*)::int AS n FROM employees GROUP BY 1, 2 ORDER BY 1, 2`;
@@ -66,6 +71,10 @@ export const server = Bun.serve({
   },
 });
 
+// Имя бота берём у Telegram — так ссылки верны и у тестового бота
+if (config.botToken) {
+  api("getMe", {}).then((r: any) => { if (r?.result?.username) config.botUsername = r.result.username; console.log("[telegram] бот @" + config.botUsername); }).catch(() => {});
+}
 startScheduler();
 if (config.liveMode || Bun.env.ROLLBACK_TO_V1 === "1") setupTelegram().catch((e) => console.error("[telegram] настройка не удалась", e));
 console.log(`[start] ${config.serviceName} ${config.version} on :${server.port}`);
