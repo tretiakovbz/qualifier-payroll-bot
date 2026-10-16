@@ -43,9 +43,15 @@ export function displayName(e: Pick<Employee, "full_name" | "name">): string {
   return e.full_name || e.name || "Сотрудник";
 }
 
+/** Postgres отдаёт BIGINT строкой — приводим id к числу, иначе сравнения uid === id ломаются */
+function norm<T extends Record<string, any> | undefined>(e: T): T {
+  if (e) for (const k of ["uid", "approved_by"]) if (e[k] !== null && e[k] !== undefined) (e as any)[k] = Number(e[k]);
+  return e;
+}
+
 export async function getEmployee(uid: number): Promise<Employee | null> {
   const rows = await db`SELECT * FROM employees WHERE uid = ${uid}`;
-  return rows[0] ?? null;
+  return norm(rows[0]) ?? null;
 }
 
 /** Обновляет имя/ник/фото из Telegram, создаёт запись, если её нет */
@@ -63,7 +69,7 @@ export async function touch(
       photo_url = COALESCE(excluded.photo_url, employees.photo_url),
       can_dm = employees.can_dm OR excluded.can_dm
     RETURNING *`;
-  return rows[0];
+  return norm(rows[0]);
 }
 
 /** Уровень админа: владелец из ADMIN_IDS, менеджер — из базы или APPROVER_USERNAMES */
@@ -115,7 +121,7 @@ export async function register(
       phone = COALESCE(excluded.phone, employees.phone), city = excluded.city,
       role = excluded.role, status = 'pending', registered_at = now(), approved_at = NULL, approved_by = NULL
     RETURNING *`;
-  return rows[0];
+  return norm(rows[0]);
 }
 
 export async function setPhone(uid: number, phone: string) {
@@ -129,7 +135,7 @@ export async function decide(uid: number, approve: boolean, actor: number): Prom
       work_start = ${approve ? today() : null}
     WHERE uid = ${uid} AND status = 'pending' RETURNING *`;
   if (rows[0]) await audit(actor, approve ? "employee.approve" : "employee.reject", { uid });
-  return rows[0] ?? null;
+  return norm(rows[0]) ?? null;
 }
 
 /** Удаление профиля = архив: история отчётов и выплат остаётся, можно регистрироваться заново */
@@ -154,5 +160,5 @@ export async function updatePrefs(uid: number, patch: Prefs): Promise<Prefs> {
 
 export async function listEmployees(filter: { role?: Role; status?: Status } = {}): Promise<Employee[]> {
   const rows: Employee[] = await db`SELECT * FROM employees ORDER BY status, role, COALESCE(full_name, name)`;
-  return rows.filter((e) => (!filter.role || e.role === filter.role) && (!filter.status || e.status === filter.status));
+  return rows.map(norm).filter((e) => (!filter.role || e.role === filter.role) && (!filter.status || e.status === filter.status));
 }

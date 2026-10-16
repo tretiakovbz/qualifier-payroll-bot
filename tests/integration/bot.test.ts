@@ -274,6 +274,20 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     expect(hist[0].n).toBeGreaterThan(0); // прежние суммы остаются в истории отменёнными
   });
 
+  test("главная: место в рейтинге и прогресс к бонусу считаются по своим отчётам", async () => {
+    const week = M.time.weekOf(M.time.today(), { startDow: 0, days: 5 });
+    await M.db`INSERT INTO reports(chat, msg, uid, name, n, day, status, role, metrics) VALUES
+      (${GROUP}, 9501, 7, 'Анна', 15, ${week[0]}, 'pending', 'qualifier', '{"forms":15,"calls":40}')`;
+    await M.db`UPDATE bonus_rules SET enabled = TRUE WHERE kind = 'top_metric' AND metric = 'forms' AND role = 'qualifier'`;
+    const me = await (await api("/api/v2/me", ANNA)).json();
+    expect(me.place.place).toBe(1);
+    const g = me.goals.find((x: any) => x.metric === "forms");
+    expect(g.value).toBeGreaterThanOrEqual(15);
+    expect(g.isLeader).toBe(true);
+    await M.db`DELETE FROM reports WHERE msg = 9501`;
+    await M.db`UPDATE bonus_rules SET enabled = FALSE WHERE kind = 'top_metric'`;
+  });
+
   test("статистика: админ выбирает команду, сотрудник видит только свою", async () => {
     const own = await (await api("/api/v2/stats/weekly?role=recruiter&metric=contracts", { id: OWNER })).json();
     expect(own.role).toBe("recruiter");

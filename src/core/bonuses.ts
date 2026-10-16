@@ -240,7 +240,7 @@ export async function bonusProgress(uid: number, role: Role, day = today()) {
     if (!rule.enabled || rule.kind !== "top_metric" || rule.role !== role || !rule.metric) continue;
     const period = rule.period === "week" ? weekOf(day, s.week) : monthOf(day);
     const rows = await metricTotals(role, rule.metric, period, { includePending: true });
-    const me = rows.find((r) => r.uid === uid)?.value ?? 0;
+    const me = rows.find((r) => r.uid === Number(uid))?.value ?? 0;
     const leader = rows[0]?.value ?? 0;
     out.push({
       ruleId: rule.id,
