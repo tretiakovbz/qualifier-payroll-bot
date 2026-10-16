@@ -4,7 +4,8 @@
 import { db } from "../db/client.ts";
 import { config } from "../config.ts";
 import { nowLocal, today } from "../lib/time.ts";
-import { reconcileReports, ensureSalary } from "./accruals.ts";
+import { reconcileReports } from "./accruals.ts";
+import { ensureSalary } from "./salary.ts";
 import { runDueBonuses } from "./bonuses.ts";
 import { runDuePromos } from "./promos.ts";
 import { getSettings } from "./settings.ts";

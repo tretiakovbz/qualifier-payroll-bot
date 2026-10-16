@@ -74,6 +74,7 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     M.db = db;
     M.settings = await import("../../src/core/settings.ts");
     M.accruals = await import("../../src/core/accruals.ts");
+    M.salary = await import("../../src/core/salary.ts");
     M.bonuses = await import("../../src/core/bonuses.ts");
     M.time = await import("../../src/lib/time.ts");
     await M.settings.updateSettings({ startDate: "2000-01-01" }, OWNER);
@@ -222,12 +223,62 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
   });
 
   test("оклад: половина месяца квалификаторам, рекрутерам выключен", async () => {
-    await M.accruals.ensureSalary();
-    await M.accruals.ensureSalary(); // повтор не задваивает
+    await M.salary.ensureSalary();
+    await M.salary.ensureSalary(); // повтор не задваивает
     expect(await activeSum(7, "salary")).toBe(10000);
     expect(await activeSum(9, "salary")).toBe(10000);
     expect(await activeSum(8, "salary")).toBe(0);
     expect(await activeSum(100, "salary")).toBe(0); // владелец — не сотрудник
+  });
+
+  test("оклад: первый рабочий день, свой размер, ручная сумма за период", async () => {
+    const OWN = { id: OWNER };
+    const cur = M.time.periodOf(M.time.today(), [5, 20]);
+    const start = M.time.addDays(cur[0], 3);
+    const post = (path: string, user: any, data: unknown) => api(path, user, { method: "POST", body: JSON.stringify(data) });
+    // менеджер видит, но менять не может
+    expect((await api("/api/v2/admin/employees/9/salary", { id: MANAGER, username: "approver1" })).status).toBe(200);
+    expect((await post("/api/v2/admin/employees/9/salary", { id: MANAGER, username: "approver1" }, { workStart: start })).status).toBe(403);
+
+    let d = await (await post("/api/v2/admin/employees/9/salary", OWN, { workStart: start })).json();
+    const expected = M.salary.calcSalary(20000, cur, { startDow: 0, days: 5 }, start);
+    expect(expected.prorated).not.toBeNull();
+    expect(expected.amount).toBeLessThan(10000);
+    expect(await activeSum(9, "salary")).toBe(expected.amount);
+    const curRow = d.periods.find((p: any) => p.when === "current");
+    expect(curRow.amount).toBe(expected.amount);
+    expect(d.periods.find((p: any) => p.when === "next").amount).toBe(10000); // со следующего периода — полный
+
+    // ручная сумма за текущий период
+    d = await (await post("/api/v2/admin/employees/9/salary/period", OWN, { periodStart: cur[0], amount: 6000, comment: "оклад за неполный период" })).json();
+    expect(await activeSum(9, "salary")).toBe(6000);
+    const acc = await M.db`SELECT comment FROM accruals WHERE uid = 9 AND kind = 'salary' AND cancelled_at IS NULL`;
+    expect(acc[0].comment).toBe("оклад за неполный период");
+    await M.salary.ensureSalary(); // планировщик ручную сумму не перетирает
+    expect(await activeSum(9, "salary")).toBe(6000);
+    // свой оклад — следующий период считается от него
+    d = await (await post("/api/v2/admin/employees/9/salary", OWN, { monthly: 30000 })).json();
+    expect(d.individual).toBe(30000);
+    expect(d.periods.find((p: any) => p.when === "next").amount).toBe(15000);
+    expect(await activeSum(9, "salary")).toBe(6000);
+    // вернуть расчёт
+    await post("/api/v2/admin/employees/9/salary/period", OWN, { periodStart: cur[0], amount: null });
+    expect(await activeSum(9, "salary")).toBe(M.salary.calcSalary(30000, cur, { startDow: 0, days: 5 }, start).amount);
+    // неверный период и сумма
+    expect((await post("/api/v2/admin/employees/9/salary/period", OWN, { periodStart: M.time.addDays(cur[0], 1), amount: 1 })).status).toBe(400);
+    expect((await post("/api/v2/admin/employees/9/salary", OWN, { monthly: -5 })).status).toBe(400);
+    // вернуть как было, чтобы не мешать следующим проверкам
+    await post("/api/v2/admin/employees/9/salary", OWN, { monthly: null, workStart: null });
+    expect(await activeSum(9, "salary")).toBe(10000);
+    const hist = await M.db`SELECT count(*)::int AS n FROM accruals WHERE uid = 9 AND kind = 'salary' AND cancelled_at IS NOT NULL`;
+    expect(hist[0].n).toBeGreaterThan(0); // прежние суммы остаются в истории отменёнными
+  });
+
+  test("статистика: админ выбирает команду, сотрудник видит только свою", async () => {
+    const own = await (await api("/api/v2/stats/weekly?role=recruiter&metric=contracts", { id: OWNER })).json();
+    expect(own.role).toBe("recruiter");
+    const anna = await (await api("/api/v2/stats/weekly?role=recruiter", ANNA)).json();
+    expect(anna.role).toBe("qualifier");
   });
 
   test("автобонус «лучший по анкетам»: порог и деление при ничьей", async () => {

@@ -179,8 +179,9 @@ const Admin = (() => {
       </div>
       ${prevUnpaid ? `<button class="btn" id="paid">Отметить выплату ${rub(e.previous.accrued)}</button>` : ""}
       <button class="btn ghost" data-go="#/admin/grant?uid=${e.uid}">Начислить бонус</button>
+      ${e.role && e.status === "active" ? `<div class="list"><button class="item" data-go="#/admin/salary/${e.uid}"><span style="color:var(--accent)">${ico("cash", 22)}</span><div class="grow" style="text-align:left"><div style="font-weight:600">Оклад</div><div class="tiny muted">${e.salary ? `${rub(e.salary.monthly)} в месяц${e.salary.individual !== null ? " · свой" : ""}${e.salary.workStart ? " · с " + human(e.salary.workStart) : ""}` : "размер, первый рабочий день, суммы по периодам"}</div></div>${chev()}</button></div>` : ""}
       <div class="section-title"><h2>Начисления</h2></div>
-      <div class="list">${e.accruals.length ? e.accruals.map((a) => `<div class="item" style="${a.cancelled ? "opacity:.45" : ""}"><div class="grow"><div style="font-weight:600">${esc(kindRu[a.kind] || a.kind)}${a.cancelled ? " · отменено" : ""}</div><div class="tiny muted">${human(a.day)}${a.comment ? " · " + esc(a.comment) : ""}</div></div><b style="color:var(--good)">${rub(a.amount)}</b>${isOwner() && !a.cancelled ? `<button class="icon-btn" style="width:36px;height:36px;margin-left:6px" aria-label="Отменить начисление" data-cancel="${a.id}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>` : ""}</div>`).join("") : '<div class="empty">Начислений пока нет</div>'}</div>
+      <div class="list">${e.accruals.length ? e.accruals.map((a) => `<div class="item" style="${a.cancelled ? "opacity:.45" : ""}"><div class="grow"><div style="font-weight:600">${esc(kindRu[a.kind] || a.kind)}${a.cancelled ? " · отменено" : ""}</div><div class="tiny muted">${human(a.day)}${a.comment ? " · " + esc(a.comment) : ""}</div></div><b style="color:var(--good)">${rub(a.amount)}</b>${isOwner() && !a.cancelled && a.kind !== "salary" ? `<button class="icon-btn" style="width:36px;height:36px;margin-left:6px" aria-label="Отменить начисление" data-cancel="${a.id}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>` : ""}</div>`).join("") : '<div class="empty">Начислений пока нет</div>'}</div>
       ${isOwner() && e.status === "active" ? `<div class="list">
         ${e.adminLevel !== "owner" ? `<button class="item" id="mgr"><span class="grow">${e.adminLevel === "manager" ? "Убрать из менеджеров" : "Сделать менеджером"}</span>${chev()}</button>` : ""}
         <button class="item" id="arch"><span class="grow" style="color:var(--warn)">Удалить профиль</span>${chev()}</button></div>
@@ -194,6 +195,74 @@ const Admin = (() => {
     if (mgr) mgr.onclick = async () => { await act(() => post(`/api/v2/admin/employees/${uid}`, { action: e.adminLevel === "manager" ? "remove_manager" : "make_manager" }), "Готово"); staffCard(uid); };
     const arch = $("#arch");
     if (arch) arch.onclick = async () => { if (await ask(`Удалить профиль ${e.name}? История сохранится.`)) { await act(() => post(`/api/v2/admin/employees/${uid}`, { action: "archive" }), "Профиль удалён"); location.hash = "#/admin/staff"; } };
+  }
+
+  // ───────── Оклад сотрудника ─────────
+  async function salaryView(uid, openPs) {
+    view(`<div class="empty">Загружаем…</div>`);
+    const [d, e] = await Promise.all([api(`/api/v2/admin/employees/${uid}/salary`), api(`/api/v2/admin/employees/${uid}`)]);
+    const own = isOwner();
+    const DOWS = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+    const weekWord = `${DOWS[d.week.startDow]}–${DOWS[(d.week.startDow + d.week.days - 1) % 7]}`;
+    const badge = (p) => p.when === "next" ? "следующий" : p.when === "current" ? "идёт сейчас" : p.paid !== null ? "выплачен" : `выплата ${human(p.payoutDay)}`;
+    const why = (p) => {
+      if (p.override) return `вписано вручную${p.override.comment ? " · " + esc(p.override.comment) : ""} · по расчёту ${rub(p.auto)}`;
+      if (p.notStarted) return `до первого рабочего дня (${human(d.workStart)})`;
+      if (p.prorated) return `${p.prorated.worked} из ${p.prorated.total} раб. дней с ${human(p.prorated.from)} · полный период ${rub(p.full)}`;
+      return "половина месячного оклада";
+    };
+    view(`
+      <h1>Оклад</h1>
+      <div class="small muted" style="margin-top:-8px">${esc(e.name)} · ${ROLE[d.role] || ""}</div>
+      <form id="sp" class="card" style="display:flex;flex-direction:column;gap:14px" novalidate>
+        <label class="field">Оклад в месяц, ₽<input name="monthly" inputmode="numeric" ${own ? "" : "disabled"} value="${d.individual !== null ? d.individual : ""}" placeholder="${d.roleEnabled ? d.roleMonthly.toLocaleString("ru-RU") + " — как у всех" : "оклад роли выключен"}"></label>
+        <div class="tiny muted" style="margin-top:-6px">Пусто — как у всех: ${d.roleEnabled ? rub(d.roleMonthly) : "без оклада"}. За каждый период начисляется половина.</div>
+        <label class="field">Первый рабочий день<input name="workStart" type="date" ${own ? "" : "disabled"} value="${d.workStart || ""}"></label>
+        <div class="tiny muted" style="margin-top:-6px">Если человек вышел посреди периода, оклад за этот период считается по отработанным рабочим дням (${weekWord}). Со следующего периода — полный.</div>
+        <div class="error" id="spErr" role="alert"></div>
+        ${own ? `<button class="btn" id="spBtn">Сохранить</button>` : `<div class="tiny muted">Менять оклад может только владелец</div>`}
+      </form>
+      <div class="section-title"><h2>По периодам</h2><span class="tiny muted">${own ? "суммы можно поправить" : ""}</span></div>
+      <div class="list">${d.periods.filter((p) => !(p.notStarted && p.when === "past" && !p.override && !p.accrued)).map((p) => `
+        <div class="item" style="flex-direction:column;align-items:stretch;gap:8px">
+          <div class="between"><div><div style="font-weight:600">${esc(p.label)}</div><div class="tiny muted">${badge(p)}</div></div>
+            <div style="text-align:right"><b class="num" style="font-size:17px">${rub(p.amount)}</b>${own ? `<button class="tiny" style="display:block;margin-left:auto;color:var(--accent);font-weight:700;padding:4px 0 0" data-edit="${p.period[0]}">Изменить</button>` : ""}</div></div>
+          <div class="tiny muted">${why(p)}${p.paid !== null && p.accrued !== p.paid ? ` · отмечено выплаченным ${rub(p.paid)}` : ""}</div>
+          <div id="ed${p.period[0]}" hidden style="display:flex;flex-direction:column;gap:10px">
+            <label class="field">Сумма оклада за этот период, ₽<input data-amt="${p.period[0]}" inputmode="numeric" value="${p.amount}"></label>
+            <label class="field">Пояснение — увидит сотрудник<input data-cm="${p.period[0]}" maxlength="120" value="${p.override && p.override.comment ? esc(p.override.comment) : ""}" placeholder="Оклад за неполный период"></label>
+            ${p.paid !== null ? `<div class="tiny" style="color:var(--warn)">Период уже отмечен выплаченным — разница останется на балансе сотрудника.</div>` : ""}
+            <div class="grid2"><button class="btn" data-save="${p.period[0]}">Сохранить</button>${p.override ? `<button class="btn ghost" data-reset="${p.period[0]}">По расчёту</button>` : `<button class="btn ghost" data-close="${p.period[0]}">Отмена</button>`}</div>
+          </div>
+        </div>`).join("")}</div>
+      <p class="tiny muted" style="margin:0 4px">Изменение сразу меняет начисление за период — сотрудник увидит новую сумму в «Мои деньги». Будущий период начислится сам, когда наступит.</p>
+    `);
+    bindCommon();
+    const toggle = (ps, show) => { const box = $("#ed" + ps); if (box) { box.hidden = !show; box.style.display = show ? "flex" : "none"; } };
+    d.periods.forEach((p) => toggle(p.period[0], p.period[0] === openPs));
+    document.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => { haptic(); const box = $("#ed" + b.dataset.edit); toggle(b.dataset.edit, box.hidden); }));
+    document.querySelectorAll("[data-close]").forEach((b) => (b.onclick = () => toggle(b.dataset.close, false)));
+    document.querySelectorAll("[data-save]").forEach((b) => (b.onclick = async () => {
+      const ps = b.dataset.save;
+      const amount = Number(String(document.querySelector(`[data-amt="${ps}"]`).value).replace(/\s/g, ""));
+      if (!Number.isFinite(amount) || amount < 0) return toast("Укажите сумму", "Число в рублях, можно 0", "error");
+      const comment = document.querySelector(`[data-cm="${ps}"]`).value;
+      await act(() => post(`/api/v2/admin/employees/${uid}/salary/period`, { periodStart: ps, amount, comment }), "Оклад за период изменён");
+      salaryView(uid);
+    }));
+    document.querySelectorAll("[data-reset]").forEach((b) => (b.onclick = async () => {
+      await act(() => post(`/api/v2/admin/employees/${uid}/salary/period`, { periodStart: b.dataset.reset, amount: null }), "Вернули расчёт");
+      salaryView(uid);
+    }));
+    const f = $("#sp");
+    f.onsubmit = async (ev) => {
+      ev.preventDefault();
+      if (!own) return;
+      const raw = String(f.monthly.value).replace(/\s/g, "");
+      if (raw !== "" && !(Number(raw) >= 0)) return ($("#spErr").textContent = "Оклад — число в рублях");
+      await act(() => post(`/api/v2/admin/employees/${uid}/salary`, { monthly: raw === "" ? null : Number(raw), workStart: f.workStart.value || null }), "Оклад сохранён");
+      salaryView(uid);
+    };
   }
 
   // ───────── Ручное начисление ─────────
@@ -527,6 +596,7 @@ const Admin = (() => {
     if (sub === "reports") return reports();
     if (sub === "staff") return id ? staffCard(id) : staff();
     if (sub === "grant") return grant(params);
+    if (sub === "salary" && id) return salaryView(id, params.get("ps"));
     if (sub === "manual") return manual(id, params);
     if (sub === "analytics") return analytics(params);
     if (sub === "settings") return settingsView();

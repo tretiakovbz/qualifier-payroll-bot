@@ -206,4 +206,18 @@ export const migrations: Migration[] = [
         AND EXISTS (SELECT 1 FROM reports r WHERE r.uid = e.uid AND r.role = 'qualifier');
     `,
   },
+  {
+    // Индивидуальный оклад: свой размер в месяц, первый рабочий день (неполный период считается
+    // пропорционально рабочим дням) и ручная сумма оклада за любой расчётный период
+    id: "007_salary_individual",
+    sql: `
+      ALTER TABLE employees ADD COLUMN IF NOT EXISTS salary_monthly INTEGER;
+      ALTER TABLE employees ADD COLUMN IF NOT EXISTS work_start DATE;
+      CREATE TABLE IF NOT EXISTS salary_overrides(
+        uid BIGINT NOT NULL, period_start DATE NOT NULL, amount INTEGER NOT NULL,
+        comment TEXT, set_by BIGINT, set_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY(uid, period_start)
+      );
+    `,
+  },
 ];

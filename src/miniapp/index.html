@@ -293,7 +293,8 @@ let TABS = TABS_BASE;
 function computeTabs() {
   const registered = S.me && S.me.status === "active" && S.me.role;
   const admin = S.me && S.me.adminLevel;
-  TABS = [...(registered ? TABS_BASE : []), ...(admin ? [["#/admin", "Админ", "shield"]] : [])];
+  // Админ без роли видит статистику команд и админку
+  TABS = [...(registered ? TABS_BASE : admin ? [TABS_BASE[1]] : []), ...(admin ? [["#/admin", "Админ", "shield"]] : [])];
 }
 function renderTabs(active) {
   $("#tabs").innerHTML = TABS.map(([href, name, icon]) => `<a href="${href}" ${href === active ? 'aria-current="page"' : ""}>${ico(icon, 26, href === active ? 2.4 : 2)}${name}</a>`).join("");
@@ -320,6 +321,11 @@ async function router() {
     document.body.classList.toggle("no-nav", TABS.length < 2);
     setBack(hash.split("?")[0] !== "#/admin");
     try { await Admin.render(hash); if (TABS.length < 2) document.body.classList.add("no-nav"); } catch (e) { view(`<div class="card"><h3>Не получилось загрузить</h3><p class="muted">${esc(e.message)}</p><button class="btn" onclick="location.reload()">Обновить</button></div>`); }
+    return;
+  }
+  if (!registered && me.adminLevel && hash === "#/stats") {
+    renderTabs("#/stats"); setBack(false);
+    try { await renderStats(); } catch (e) { view(`<div class="card"><h3>Не получилось загрузить</h3><p class="muted">${esc(e.message)}</p><button class="btn" onclick="location.reload()">Обновить</button></div>`); }
     return;
   }
   if (!registered && me.adminLevel && hash !== "#/register") { location.hash = "#/admin"; return; }
@@ -426,7 +432,7 @@ function accrualRow(a) {
   const isBonus = a.kind === "bonus" || a.kind === "manual" || a.kind === "promo";
   const title = a.kind === "salary" ? "Оклад" : a.kind === "form" ? (a.comment || "Анкеты").replace(/^анкет: (\d+)$/, (m, n) => `${n} ${plural(+n, "анкета", "анкеты", "анкет")} подтверждено`)
     : a.kind === "contract" ? (a.comment || "Контракты").replace(/^контрактов: (\d+)$/, (m, n) => `${n} ${plural(+n, "контракт", "контракта", "контрактов")} засчитано`) : a.comment || KIND_LABEL[a.kind];
-  return `<div class="item"><span class="ico" ${isBonus ? 'style="background:rgba(255,194,75,.14)"' : ""}>${isBonus ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${I.gift}</svg>` : ico(KIND_ICON[a.kind] || "doc")}</span><div class="grow"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(title)}</div><div class="tiny muted">${human(a.day)}</div></div><b style="color:${a.amount >= 0 ? "var(--good)" : "var(--warn)"}">${a.amount >= 0 ? "+" : ""}${rub(a.amount)}</b></div>`;
+  return `<div class="item"><span class="ico" ${isBonus ? 'style="background:rgba(255,194,75,.14)"' : ""}>${isBonus ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${I.gift}</svg>` : ico(KIND_ICON[a.kind] || "doc")}</span><div class="grow"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(title)}</div><div class="tiny muted">${human(a.day)}${a.kind === "salary" && a.comment && a.comment !== "оклад, половина месяца" ? " · " + esc(a.comment.replace(/^оклад,?\s*/, "")) : ""}</div></div><b style="color:${a.amount >= 0 ? "var(--good)" : "var(--warn)"}">${a.amount >= 0 ? "+" : ""}${rub(a.amount)}</b></div>`;
 }
 
 function bindCommon() {
@@ -437,29 +443,60 @@ function bindCommon() {
 // ───────── Статистика ─────────
 const METRIC_RU = { forms: "Анкеты", calls: "Недозвоны", contracts: "Контракты", docs: "Документы", vvk: "ВВК" };
 const PALETTE = ["--c1", "--c2", "--c3", "--c4", "--c5", "--c6"];
+/** Порядок вкладок показателей на экране статистики */
+const METRIC_ORDER = { qualifier: ["calls", "forms"], recruiter: ["contracts", "docs", "vvk"] };
+const ROLE_PL_RU = { qualifier: "Квалификаторы", recruiter: "Рекрутеры" };
+
+/** Чью статистику смотрим: сотрудник — свою команду, админ — любую */
+function statsRole() {
+  if (S.me.adminLevel && !DEMO) return S.statsRole || S.me.role || "qualifier";
+  return S.me.role;
+}
 
 async function renderStats() {
-  const role = S.me.role;
-  if (!S.metric) S.metric = role === "recruiter" ? "contracts" : "forms";
-  view(`<div class="between"><h1>Статистика</h1><span class="tiny muted" style="background:var(--card);padding:6px 10px;border-radius:10px">${role === "recruiter" ? "Рекрутеры" : "Квалификаторы"}</span></div><div class="empty">Загружаем…</div>`);
-  const d = await api(`/api/v2/stats/weekly?metric=${S.metric}&weeks=8${DEMO ? "&role=" + role : ""}`);
+  const role = statsRole();
+  if (!S.metric || !METRIC_ORDER[role].includes(S.metric)) S.metric = role === "recruiter" ? "contracts" : "forms";
+  view(`<div class="between"><h1>Статистика</h1>${teamChip(role)}</div>${teamSeg(role)}<div class="empty">Загружаем…</div>`);
+  const asAdmin = S.me.adminLevel && !DEMO;
+  const d = await api(`/api/v2/stats/weekly?metric=${S.metric}&weeks=8${DEMO || asAdmin ? "&role=" + role : ""}`);
   S.stats = d;
   drawStats();
 }
 
+function teamChip(role) {
+  if (S.me.adminLevel && !DEMO) {
+    return "";
+  }
+  return `<span class="tiny muted" style="background:var(--card);padding:6px 10px;border-radius:10px">${ROLE_PL_RU[role]}</span>`;
+}
+
+/** Переключатель команды для админа — отдельной строкой под заголовком */
+function teamSeg(role) {
+  if (!S.me.adminLevel || DEMO) return "";
+  return `<div class="seg" role="group" aria-label="Команда">${["qualifier", "recruiter"].map((r) => `<button data-team="${r}" aria-pressed="${r === role}">${ROLE_PL_RU[r]}</button>`).join("")}</div>`;
+}
+
 function drawStats() {
-  const d = S.stats, role = S.me.role;
+  const d = S.stats, role = d.role || statsRole();
+  // Наблюдатель — админ, который смотрит не свою команду: без «Я», с итогами команды
+  const observer = !d.series.some((s) => s.me) && !!S.me.adminLevel && (S.me.role !== role || S.me.status !== "active");
+  const order = (METRIC_ORDER[role] || d.metrics).filter((m) => d.metrics.includes(m));
   const mine = d.series.find((s) => s.me) || { values: Array(d.series[0] ? d.series[0].values.length : 8).fill(0) };
   const mates = d.series.filter((s) => !s.me);
-  mates.forEach((m, i) => { if (S.on[m.uid] === undefined) S.on[m.uid] = i === 0; m.color = `var(${PALETTE[i % PALETTE.length]})`; });
+  mates.forEach((m, i) => { if (S.on[m.uid] === undefined) S.on[m.uid] = observer ? i < 4 : i === 0; m.color = `var(${PALETTE[i % PALETTE.length]})`; });
   const v = mine.values, last = v[v.length - 1] || 0, prev = v[v.length - 2] || 0;
   const growth = prev > 0 ? Math.round(((last - prev) / prev) * 100) : last > 0 ? 100 : 0;
   const record = Math.max(0, ...v);
   const place = d.rating.findIndex((r) => r.me) + 1;
+  // Итоги команды для наблюдателя
+  const teamAt = (i) => d.series.reduce((sum, s) => sum + (s.values[i] || 0), 0);
+  const tLast = teamAt(v.length - 1), tPrev = teamAt(v.length - 2);
+  const tGrowth = tPrev > 0 ? Math.round(((tLast - tPrev) / tPrev) * 100) : tLast > 0 ? 100 : 0;
+  const leader = d.rating[0] && d.rating[0].value > 0 ? d.rating[0] : null;
 
   // график
   const W = 340, H = 210, x0 = 30, x1 = 330, yt = 14, yb = 176;
-  const visible = [mine, ...mates.filter((m) => S.on[m.uid])];
+  const visible = [...(observer ? [] : [mine]), ...mates.filter((m) => S.on[m.uid])];
   const max = Math.max(4, ...visible.flatMap((s) => s.values));
   const step = max <= 5 ? 1 : max <= 12 ? 2 : max <= 30 ? 5 : max <= 60 ? 10 : max <= 150 ? 25 : 50;
   const ymax = Math.ceil(max / (2 * step)) * 2 * step; // чётное число шагов — средняя отметка целая
@@ -473,30 +510,35 @@ function drawStats() {
   const svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(METRIC_RU[d.metric])} по неделям: у вас ${last} на этой неделе">
     ${ticks.map((t, i) => `<line x1="${x0}" x2="${x1}" y1="${Y(t)}" y2="${Y(t)}" stroke="var(--line)" ${i ? 'stroke-dasharray="3 4"' : ""}/><text x="${x0 - 8}" y="${Y(t) + 3}" text-anchor="end" font-size="10" fill="var(--faint)">${t}</text>`).join("")}
     ${mates.filter((m) => S.on[m.uid]).map((m) => `<polyline points="${pts(m.values)}" fill="none" stroke="${m.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`).join("")}
-    <polyline class="me-line" points="${pts(v)}" fill="none" stroke="var(--accent)" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
+    ${observer ? "" : `<polyline class="me-line" points="${pts(v)}" fill="none" stroke="var(--accent)" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
     <circle cx="${X(n - 1)}" cy="${Y(last)}" r="6" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
-    <text x="${X(n - 1) - 4}" y="${Y(last) - 12}" text-anchor="end" font-size="12" font-weight="700" fill="var(--text)">${last}</text>
+    <text x="${X(n - 1) - 4}" y="${Y(last) - 12}" text-anchor="end" font-size="12" font-weight="700" fill="var(--text)">${last}</text>`}
     ${lblIdx.map((i, k) => `<text x="${X(i)}" y="${H - 8}" text-anchor="${k === 0 ? "start" : k === 3 ? "end" : "middle"}" font-size="10" fill="var(--faint)">${esc(labels[i] || "")}</text>`).join("")}
   </svg>`;
 
   const top = Math.max(1, ...d.rating.map((r) => r.value));
   const medals = ["var(--gold)", "#C9D1E4", "#D9925B"];
   view(`
-    <div class="between"><h1>Статистика</h1><span class="tiny muted" style="background:var(--card);padding:6px 10px;border-radius:10px">${role === "recruiter" ? "Рекрутеры" : "Квалификаторы"}</span></div>
-    <div class="seg" role="group" aria-label="Показатель">${d.metrics.map((m) => `<button data-metric="${m}" aria-pressed="${m === d.metric}">${METRIC_RU[m]}</button>`).join("")}</div>
-    <div class="grid3">
+    <div class="between"><h1>Статистика</h1>${teamChip(role)}</div>
+    ${teamSeg(role)}
+    <div class="seg" role="group" aria-label="Показатель">${order.map((m) => `<button data-metric="${m}" aria-pressed="${m === d.metric}">${METRIC_RU[m]}</button>`).join("")}</div>
+    ${observer ? `<div class="grid3">
+      <div class="card" style="padding:12px"><div class="num" style="font-size:20px">${tLast}</div><div class="tiny muted">команда за неделю</div></div>
+      <div class="card" style="padding:12px"><div class="num" style="font-size:20px;color:${tGrowth >= 0 ? "var(--good)" : "var(--warn)"}">${tGrowth > 0 ? "+" : ""}${tGrowth}%</div><div class="tiny muted">к прошлой неделе</div></div>
+      <div class="card" style="padding:12px"><div style="font-size:15px;font-weight:700;color:var(--gold);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${leader ? esc(leader.name.split(" ")[0]) : "—"}</div><div class="tiny muted">лидер недели</div></div>
+    </div>` : `<div class="grid3">
       <div class="card" style="padding:12px"><div class="num" style="font-size:20px;color:${growth >= 0 ? "var(--good)" : "var(--warn)"}">${growth > 0 ? "+" : ""}${growth}%</div><div class="tiny muted">к прошлой неделе</div></div>
       <div class="card" style="padding:12px"><div class="num" style="font-size:20px">${record}</div><div class="tiny muted">личный рекорд</div></div>
       <div class="card" style="padding:12px"><div class="num" style="font-size:20px;color:var(--gold)">${place ? place + " из " + d.rating.length : "—"}</div><div class="tiny muted">место недели</div></div>
-    </div>
+    </div>`}
     <section class="card" style="display:flex;flex-direction:column;gap:12px;padding:16px">
       <div class="between"><h3>${METRIC_RU[d.metric]} по неделям</h3><span class="tiny muted">${n} ${plural(n, "неделя", "недели", "недель")}</span></div>
       ${svg}
-      ${mates.length ? `<div class="tiny muted">Сравнить с коллегами</div>
+      ${mates.length ? `<div class="tiny muted">${observer ? "Кого показать на графике" : "Сравнить с коллегами"}</div>
       <div style="display:flex;flex-wrap:wrap;gap:8px">
-        <span class="row" style="gap:8px;height:40px;padding:0 12px;border-radius:12px;background:var(--accent-soft);font-weight:600;font-size:14px"><span style="width:10px;height:10px;border-radius:50%;background:var(--accent)"></span>Я</span>
+        ${observer ? "" : `<span class="row" style="gap:8px;height:40px;padding:0 12px;border-radius:12px;background:var(--accent-soft);font-weight:600;font-size:14px"><span style="width:10px;height:10px;border-radius:50%;background:var(--accent)"></span>Я</span>`}
         ${mates.map((m) => `<button data-mate="${m.uid}" aria-pressed="${!!S.on[m.uid]}" class="row" style="gap:8px;height:40px;padding:0 12px;border-radius:12px;border:1px solid var(--line);background:var(--card2);font-size:14px"><span style="width:18px;height:18px;border-radius:6px;display:grid;place-items:center;${S.on[m.uid] ? `background:${m.color}` : `border:2px solid ${m.color}`}">${S.on[m.uid] ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--bg)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">${I.check}</svg>` : ""}</span>${esc(m.name.split(" ")[0])}</button>`).join("")}
-      </div>` : `<div class="small muted">Когда в команде появятся коллеги вашей роли, их можно будет добавить на график для сравнения.</div>`}
+      </div>` : observer ? `<div class="small muted">${role === "recruiter" ? "Рекрутеров пока нет. Когда первый рекрутер зарегистрируется и вы его одобрите, здесь появятся его контракты, документы и ВВК." : "Квалификаторов с отчётами пока нет."}</div>` : `<div class="small muted">Когда в команде появятся коллеги вашей роли, их можно будет добавить на график для сравнения.</div>`}
     </section>
     <div class="section-title"><h2>Рейтинг недели</h2>${d.weeks && d.weeks.length ? `<span class="tiny muted">${human(d.weeks[n - 1][0])} – ${human(d.weeks[n - 1][1])}</span>` : ""}</div>
     <div class="list" style="padding:8px 16px">${d.rating.length ? d.rating.map((r, i) => `
@@ -506,6 +548,7 @@ function drawStats() {
       </div>`).join("") : '<div class="empty">На этой неделе отчётов ещё нет</div>'}</div>
   `);
   document.querySelectorAll("[data-metric]").forEach((b) => (b.onclick = async () => { if (b.dataset.metric === S.metric) return; haptic(); S.metric = b.dataset.metric; await renderStats(); }));
+  document.querySelectorAll("[data-team]").forEach((b) => (b.onclick = async () => { if (b.dataset.team === role) return; haptic(); S.statsRole = b.dataset.team; S.metric = null; await renderStats(); }));
   document.querySelectorAll("[data-mate]").forEach((b) => (b.onclick = () => { haptic(); S.on[b.dataset.mate] = !S.on[b.dataset.mate]; drawStats(); }));
   growBars();
 }

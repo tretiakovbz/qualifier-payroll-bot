@@ -14,6 +14,7 @@ import { listDirections, saveDirection } from "../core/directions.ts";
 import { listReports, setReportStatus, pendingCount } from "../core/reports.ts";
 import { listNotifications, markRead } from "../core/notify.ts";
 import { announceRegistration } from "../bot/updates.ts";
+import { salaryOverview, setSalaryProfile, setSalaryOverride, SalaryError, monthlyOf, workStartOf } from "../core/salary.ts";
 import { checkAchievements, recordsOf, streaks, DEFS } from "../core/achievements.ts";
 import { listPromos, savePromo, listStories, saveStory, hideStory, PromoError } from "../core/promos.ts";
 import { sendDocument } from "../lib/telegram.ts";
@@ -133,8 +134,11 @@ const prefs: Handler = async ({ req, user }) => {
 const weekly: Handler = async ({ user, url }) => {
   const demo = url.searchParams.get("demo") === "1";
   const e = demo ? null : await staff.getEmployee(user.id);
-  const role = (demo ? (url.searchParams.get("role") as Role) || "qualifier" : e?.role) as Role | null;
-  if (!role || (!demo && e?.status !== "active")) return fail(403, "Статистика доступна после одобрения регистрации");
+  const asked = url.searchParams.get("role") as Role | null;
+  // Админ может смотреть статистику любой команды, сотрудник — только своей
+  const isAdm = !demo && asked && (asked === "qualifier" || asked === "recruiter") ? Boolean(await staff.adminLevel(user)) : false;
+  const role = (demo ? asked || "qualifier" : isAdm ? asked : e?.role) as Role | null;
+  if (!role || (!demo && !isAdm && e?.status !== "active")) return fail(403, "Статистика доступна после одобрения регистрации");
   const metric = (url.searchParams.get("metric") as Metric) || METRICS[role][0];
   if (!METRICS[role].includes(metric)) return fail(400, "Нет такого показателя для вашей роли");
   const weeks = Math.min(26, Math.max(4, Number(url.searchParams.get("weeks") ?? 8)));
@@ -353,7 +357,37 @@ const adminEmployee: Handler = async ({ params }) => {
     balance: { ...(await balanceOf(uid, cur)), label: humanRange(cur) },
     previous: { ...(await balanceOf(uid, prev)), label: humanRange(prev) },
     accruals: accruals.map((a: any) => ({ ...a, id: Number(a.id), cancelled: Boolean(a.cancelled_at) })),
+    salary: e.role ? { monthly: monthlyOf(e as any, s), individual: e.salary_monthly ?? null, workStart: workStartOf(e as any) } : null,
   });
+};
+
+const adminSalaryGet: Handler = async ({ params }) => {
+  const d = await salaryOverview(Number(params.uid));
+  return d ? ok(d) : fail(404, "Сотрудник не найден");
+};
+
+const adminSalaryProfile: Handler = async ({ req, user, params }) => {
+  const b = await body<{ monthly?: number | null; workStart?: string | null }>(req);
+  const patch: { monthly?: number | null; workStart?: string | null } = {};
+  if ("monthly" in b) patch.monthly = b.monthly === null || (b.monthly as unknown) === "" ? null : Number(b.monthly);
+  if ("workStart" in b) patch.workStart = b.workStart || null;
+  try {
+    return ok(await setSalaryProfile(Number(params.uid), patch, user.id));
+  } catch (e) {
+    if (e instanceof SalaryError) return fail(400, e.message);
+    throw e;
+  }
+};
+
+const adminSalaryPeriod: Handler = async ({ req, user, params }) => {
+  const b = await body<{ periodStart: string; amount: number | null; comment?: string }>(req);
+  const amount = b.amount === null || (b.amount as unknown) === "" ? null : Number(b.amount);
+  try {
+    return ok(await setSalaryOverride(Number(params.uid), String(b.periodStart ?? ""), amount, b.comment ?? null, user.id));
+  } catch (e) {
+    if (e instanceof SalaryError) return fail(400, e.message);
+    throw e;
+  }
 };
 
 const adminPromosGet: Handler = async () => ok({ promos: await listPromos(), stories: await listStories({ all: true }) });
@@ -477,6 +511,9 @@ const routes: [string, string, Handler][] = [
   ["GET", "/api/v2/admin/analytics", admin("manager", adminAnalytics)],
   ["POST", "/api/v2/admin/payouts", admin("manager", adminPayout)],
   ["GET", "/api/v2/admin/employees/:uid", admin("manager", adminEmployee)],
+  ["GET", "/api/v2/admin/employees/:uid/salary", admin("manager", adminSalaryGet)],
+  ["POST", "/api/v2/admin/employees/:uid/salary", admin("owner", adminSalaryProfile)],
+  ["POST", "/api/v2/admin/employees/:uid/salary/period", admin("owner", adminSalaryPeriod)],
   ["GET", "/api/v2/admin/promos", admin("manager", adminPromosGet)],
   ["POST", "/api/v2/admin/promos", admin("owner", adminPromoSave)],
   ["POST", "/api/v2/admin/stories", admin("owner", adminStorySave)],

@@ -139,34 +139,6 @@ export async function reconcileReports(opts: { notifyRecentDays?: number } = {})
   return { created, cancelled: cancelled.length };
 }
 
-/** Начислить оклад за текущий расчётный период действующим сотрудникам */
-export async function ensureSalary(day = today()): Promise<number> {
-  const s = await getSettings();
-  const period = periodOf(day, s.payoutDays);
-  if (period[1] < s.startDate) return 0;
-  let count = 0;
-  for (const role of ["qualifier", "recruiter"] as const) {
-    const cfg = s.salary[role];
-    if (!cfg.enabled || cfg.monthly <= 0) continue;
-    // Оклад делится пополам между двумя выплатами месяца
-    const amount = Math.round(cfg.monthly / 2);
-    const staff = await db`SELECT uid FROM employees WHERE status = 'active' AND role = ${role}
-      AND (approved_at IS NULL OR approved_at::date <= ${period[1]})`;
-    for (const e of staff) {
-      const acc = await createAccrual({
-        uid: Number(e.uid),
-        kind: "salary",
-        amount,
-        day: period[0] < s.startDate ? s.startDate : period[0],
-        dedupeKey: `salary:${e.uid}:${period[0]}`,
-        comment: "оклад, половина месяца",
-      });
-      if (acc) count++;
-    }
-  }
-  return count;
-}
-
 /** Ручное начисление админом (разовый бонус или бонус из списка) */
 export async function manualAccrual(a: {
   uid: number;

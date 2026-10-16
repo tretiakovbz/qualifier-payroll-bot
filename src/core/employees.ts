@@ -4,6 +4,7 @@ import { db } from "../db/client.ts";
 import { audit, json } from "../db/audit.ts";
 import { config } from "../config.ts";
 import type { Role } from "../lib/report.ts";
+import { today } from "../lib/time.ts";
 
 /** new — написал боту, но не регистрировался; pending — заявка у админа */
 export type Status = "new" | "pending" | "active" | "rejected" | "archived";
@@ -26,6 +27,8 @@ export interface Employee {
   prefs: Prefs;
   registered_at: string | null;
   approved_at: string | null;
+  salary_monthly: number | null;
+  work_start: string | Date | null;
 }
 
 export interface Prefs {
@@ -122,7 +125,8 @@ export async function setPhone(uid: number, phone: string) {
 export async function decide(uid: number, approve: boolean, actor: number): Promise<Employee | null> {
   const rows = await db`
     UPDATE employees SET status = ${approve ? "active" : "rejected"},
-      approved_at = ${approve ? new Date() : null}, approved_by = ${actor}
+      approved_at = ${approve ? new Date() : null}, approved_by = ${actor},
+      work_start = ${approve ? today() : null}
     WHERE uid = ${uid} AND status = 'pending' RETURNING *`;
   if (rows[0]) await audit(actor, approve ? "employee.approve" : "employee.reject", { uid });
   return rows[0] ?? null;
