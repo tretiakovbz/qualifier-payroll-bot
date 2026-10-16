@@ -495,7 +495,7 @@ function drawStats() {
   const leader = d.rating[0] && d.rating[0].value > 0 ? d.rating[0] : null;
 
   // график
-  const W = 340, H = 210, x0 = 30, x1 = 330, yt = 14, yb = 176;
+  const W = 340, H = 226, x0 = 30, x1 = 326, yt = 14, yb = 176;
   const visible = [...(observer ? [] : [mine]), ...mates.filter((m) => S.on[m.uid])];
   const max = Math.max(4, ...visible.flatMap((s) => s.values));
   const step = max <= 5 ? 1 : max <= 12 ? 2 : max <= 30 ? 5 : max <= 60 ? 10 : max <= 150 ? 25 : 50;
@@ -505,15 +505,20 @@ function drawStats() {
   const Y = (val) => yb - (val / ymax) * (yb - yt);
   const pts = (arr) => arr.map((val, i) => `${X(i).toFixed(1)},${Y(val).toFixed(1)}`).join(" ");
   const ticks = [0, ymax / 2, ymax];
-  const labels = (d.weeks && d.weeks.length ? d.weeks.map((w) => short(w[0])) : v.map((_, i) => `${i + 1} нед`));
-  const lblIdx = [0, Math.round((n - 1) / 3), Math.round((2 * (n - 1)) / 3), n - 1];
+  // Подпись у каждой точки — дни рабочей недели («11–15»), под ней месяц, когда он меняется
+  const MON = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+  const wk = d.weeks && d.weeks.length === n ? d.weeks : null;
+  const dayRow = wk ? wk.map((w) => `${+w[0].slice(8, 10)}–${+w[1].slice(8, 10)}`) : v.map((_, i) => `${i + 1}`);
+  const monRow = wk ? wk.map((w, i) => { const m = MON[+w[1].slice(5, 7) - 1]; return i === 0 || w[1].slice(5, 7) !== wk[i - 1][1].slice(5, 7) ? m : ""; }) : v.map(() => "");
+  const anchor = (i) => (i === n - 1 ? "end" : i === 0 ? "start" : "middle");
+  const lx = (i) => (i === 0 ? X(i) - 10 : i === n - 1 ? X(i) + 12 : X(i));
   const svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(METRIC_RU[d.metric])} по неделям: у вас ${last} на этой неделе">
     ${ticks.map((t, i) => `<line x1="${x0}" x2="${x1}" y1="${Y(t)}" y2="${Y(t)}" stroke="var(--line)" ${i ? 'stroke-dasharray="3 4"' : ""}/><text x="${x0 - 8}" y="${Y(t) + 3}" text-anchor="end" font-size="10" fill="var(--faint)">${t}</text>`).join("")}
     ${mates.filter((m) => S.on[m.uid]).map((m) => `<polyline points="${pts(m.values)}" fill="none" stroke="${m.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`).join("")}
     ${observer ? "" : `<polyline class="me-line" points="${pts(v)}" fill="none" stroke="var(--accent)" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
     <circle cx="${X(n - 1)}" cy="${Y(last)}" r="6" fill="var(--bg)" stroke="var(--accent)" stroke-width="3"/>
     <text x="${X(n - 1) - 4}" y="${Y(last) - 12}" text-anchor="end" font-size="12" font-weight="700" fill="var(--text)">${last}</text>`}
-    ${lblIdx.map((i, k) => `<text x="${X(i)}" y="${H - 8}" text-anchor="${k === 0 ? "start" : k === 3 ? "end" : "middle"}" font-size="10" fill="var(--faint)">${esc(labels[i] || "")}</text>`).join("")}
+    ${dayRow.map((t, i) => `<text x="${lx(i)}" y="${yb + 22}" text-anchor="${anchor(i)}" font-size="10" ${i === n - 1 ? 'font-weight="700" fill="var(--text)"' : 'fill="var(--faint)"'}>${esc(t)}</text>${monRow[i] ? `<text x="${lx(i)}" y="${yb + 38}" text-anchor="${anchor(i)}" font-size="10" fill="var(--faint)">${monRow[i]}</text>` : ""}`).join("")}
   </svg>`;
 
   const top = Math.max(1, ...d.rating.map((r) => r.value));
@@ -532,7 +537,7 @@ function drawStats() {
       <div class="card" style="padding:12px"><div class="num" style="font-size:20px;color:var(--gold)">${place ? place + " из " + d.rating.length : "—"}</div><div class="tiny muted">место недели</div></div>
     </div>`}
     <section class="card" style="display:flex;flex-direction:column;gap:12px;padding:16px">
-      <div class="between"><h3>${METRIC_RU[d.metric]} по неделям</h3><span class="tiny muted">${n} ${plural(n, "неделя", "недели", "недель")}</span></div>
+      <div class="between"><h3>${METRIC_RU[d.metric]} по неделям</h3><span class="tiny muted">по рабочим неделям</span></div>
       ${svg}
       ${mates.length ? `<div class="tiny muted">${observer ? "Кого показать на графике" : "Сравнить с коллегами"}</div>
       <div style="display:flex;flex-wrap:wrap;gap:8px">
