@@ -4,6 +4,7 @@
 import { db } from "../db/client.ts";
 import { audit, json } from "../db/audit.ts";
 import type { PayoutDays, WeekConfig } from "../lib/time.ts";
+import { cid } from "./tenant.ts";
 
 export interface Settings {
   rates: { perForm: number; contractBase: number };
@@ -36,7 +37,8 @@ export const DEFAULT_SETTINGS: Settings = {
   phrases: null,
 };
 
-let cache: { value: Settings; at: number } | null = null;
+/** Кэш настроек по компаниям */
+const cache = new Map<number, { value: Settings; at: number }>();
 const TTL = 15_000;
 
 function merge<T>(base: T, patch: any): T {
@@ -49,11 +51,16 @@ function merge<T>(base: T, patch: any): T {
   return out;
 }
 
+const keyOf = (id: number) => "company:" + id;
+
 export async function getSettings(): Promise<Settings> {
-  if (cache && Date.now() - cache.at < TTL) return cache.value;
-  const rows = await db`SELECT value FROM settings WHERE key = 'main'`;
-  const value = merge(DEFAULT_SETTINGS, rows[0]?.value ?? {});
-  cache = { value, at: Date.now() };
+  const id = cid();
+  const hit = cache.get(id);
+  if (hit && Date.now() - hit.at < TTL) return hit.value;
+  const rows = await db`SELECT value FROM settings WHERE key = ${keyOf(id)}`;
+  const raw = rows[0]?.value;
+  const value = merge(DEFAULT_SETTINGS, typeof raw === "string" ? JSON.parse(raw) : raw ?? {});
+  cache.set(id, { value, at: Date.now() });
   return value;
 }
 
@@ -71,15 +78,15 @@ export async function updateSettings(patch: Partial<Settings>, actor: number): P
   const next = merge(current, patch);
   const err = validateSettings(next);
   if (err) throw new SettingsError(err);
-  await db`INSERT INTO settings(key, value, updated_by) VALUES('main', ${json(next)}::text::jsonb, ${actor})
+  await db`INSERT INTO settings(key, value, updated_by) VALUES(${keyOf(cid())}, ${json(next)}::text::jsonb, ${actor})
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = now(), updated_by = excluded.updated_by`;
   await audit(actor, "settings.update", patch);
-  cache = { value: next, at: Date.now() };
+  cache.set(cid(), { value: next, at: Date.now() });
   return next;
 }
 
 export class SettingsError extends Error {}
 
 export function resetSettingsCache() {
-  cache = null;
+  cache.clear();
 }

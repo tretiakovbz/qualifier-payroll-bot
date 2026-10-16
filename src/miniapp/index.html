@@ -151,6 +151,14 @@ const tg = window.Telegram && window.Telegram.WebApp;
 const INIT = tg && tg.initData ? tg.initData : "";
 const DEMO = !INIT;
 const TG_USER = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) || {};
+/** Код приглашения: из ссылки t.me/бот?startapp=join_КОД или из адреса ?join=КОД */
+let JOIN = (() => {
+  const sp = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || "";
+  const m = sp.match(/^join_([A-Za-z0-9]+)$/);
+  if (m) return m[1];
+  const q = new URLSearchParams(location.search).get("join");
+  return q && /^[A-Za-z0-9]+$/.test(q) ? q : null;
+})();
 const S = { me: null, stats: null, metric: null, on: {}, money: null, notes: null, seenStories: load("seen", {}) };
 
 try { tg && tg.ready(); tg && tg.expand(); } catch (e) {}
@@ -200,6 +208,9 @@ const I = {
   check: '<path d="M5 12l5 5 9-10"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
   star: '<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/>',
+  link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M18 14a6 6 0 0 1 3.5 6"/>',
+  building: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M9 15h2M13 15h2"/>',
   shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
   palette: '<circle cx="12" cy="12" r="9"/><circle cx="8" cy="10" r="1.2"/><circle cx="12" cy="7.5" r="1.2"/><circle cx="16" cy="10" r="1.2"/><path d="M12 21a3 3 0 0 1 0-6h2a3 3 0 0 0 3-3"/>',
 };
@@ -314,8 +325,12 @@ async function router() {
   const hash = location.hash || "#/home";
   const me = S.me;
   if (!me) return;
-  const registered = me.status === "active" && me.role;
+  const registered = me.status === "active" && me.role && me.company;
   computeTabs();
+  // Приглашение: показываем экран вступления, пока человек не в этой команде
+  if (JOIN) return renderJoin(JOIN);
+  // Нет компании: руководитель создаёт свою, сотрудник ждёт ссылку от руководителя
+  if (!me.company) return renderWelcome();
   if (me.adminLevel && hash.startsWith("#/admin")) {
     renderTabs(hash.split("?")[0] === "#/admin" ? "#/admin" : "#/admin");
     document.body.classList.toggle("no-nav", TABS.length < 2);
@@ -328,19 +343,16 @@ async function router() {
     try { await renderStats(); } catch (e) { view(`<div class="card"><h3>Не получилось загрузить</h3><p class="muted">${esc(e.message)}</p><button class="btn" onclick="location.reload()">Обновить</button></div>`); }
     return;
   }
-  if (!registered && me.adminLevel && hash !== "#/register") { location.hash = "#/admin"; return; }
-  if (!registered && hash !== "#/register") {
-    if (me.registered || (me.status === "pending" && me.role)) return renderPending();
-    return renderRegister();
-  }
+  if (!registered && me.adminLevel) { location.hash = "#/admin"; return; }
+  if (!registered) return renderPending();
   const routes = {
     "#/home": renderHome, "#/stats": renderStats, "#/profile": renderProfile,
-    "#/profile/settings": renderSettings, "#/profile/money": renderMoney, "#/profile/achievements": renderAchievements, "#/help": renderHelp, "#/register": registered ? renderHome : renderRegister,
+    "#/profile/settings": renderSettings, "#/profile/money": renderMoney, "#/profile/achievements": renderAchievements, "#/help": renderHelp,
   };
   const fn = routes[hash] || renderHome;
   const isTab = TABS.some(([h]) => h === hash);
   renderTabs(isTab ? hash : hash.startsWith("#/profile") ? "#/profile" : "#/home");
-  setBack(!isTab && hash !== "#/register");
+  setBack(!isTab);
   try { await fn(); } catch (e) { view(`<div class="card"><h3>Не получилось загрузить</h3><p class="muted">${esc(e.message)}</p><button class="btn" onclick="location.reload()">Обновить</button></div>`); }
 }
 window.addEventListener("hashchange", router);
@@ -562,6 +574,7 @@ async function renderProfile() {
       <span style="border:3px solid var(--accent);border-radius:50%;padding:2px">${avatar(88)}</span>
       <div style="font-size:22px;font-weight:800;margin-top:6px;text-align:center">${esc(me.name)}</div>
       <div class="small muted">${me.role === "recruiter" ? "Рекрутер" : "Квалификатор"}${joined ? ` · в команде с ${joined}` : ""}</div>
+      ${me.company ? `<div class="pill" style="margin-top:4px">${ico("building", 13)} ${esc(me.company.name)}</div>` : ""}
     </div>
     <div class="grid2">
       <button class="card" style="text-align:left;display:flex;flex-direction:column;gap:10px" data-go="#/profile/achievements"><span style="display:flex;gap:4px"><span style="width:28px;height:28px;border-radius:9px;background:var(--gold);display:grid;place-items:center;color:#1a1405">${ico("medal", 16, 2.4)}</span><span style="width:28px;height:28px;border-radius:9px;background:var(--warn);display:grid;place-items:center;color:#1a1405">${ico("flame", 16, 2.4)}</span><span style="width:28px;height:28px;border-radius:9px;background:var(--good);display:grid;place-items:center;color:#0a1a12">${ico("star", 16, 2.4)}</span></span><b>Достижения</b><span class="small muted">${me.achievements ? `${me.achievements.earned} из ${me.achievements.total} открыто` : "Значки и рекорды"}</span></button>
@@ -577,8 +590,11 @@ async function renderProfile() {
       <button class="item" data-go="#/help"><span class="ico">${ico("doc")}</span><span class="grow">Как писать отчёт</span>${ico("chev", 16, 2.4).replace("<svg", '<svg class="chev"')}</button>
       ${me.contact ? `<a class="item" style="text-decoration:none;color:inherit" href="https://t.me/${esc(me.contact)}"><span class="ico">${ico("chat")}</span><span class="grow">Написать админу</span>${ico("chev", 16, 2.4).replace("<svg", '<svg class="chev"')}</a>` : ""}
     </div>
-    <p class="tiny muted" style="text-align:center;margin:0">Роль выбирается один раз. Чтобы сменить её, напишите админу.</p>
+    ${me.company && !me.company.isOwner ? `<div class="list"><button class="item" id="leaveCo"><span class="ico">${ico("building")}</span><span class="grow" style="color:var(--warn)">Выйти из компании</span>${ico("chev", 16, 2.4).replace("<svg", '<svg class="chev"')}</button></div>` : ""}
+    <p class="tiny muted" style="text-align:center;margin:0">Роль выбирается один раз. Чтобы сменить её, напишите руководителю. Выйдя из компании, можно вступить в другую или создать свою.</p>
   `);
+  const leaveBtn = $("#leaveCo");
+  if (leaveBtn) leaveBtn.onclick = () => leaveCompany();
   document.querySelectorAll("[data-theme-pick]").forEach((b) => (b.onclick = () => pickTheme(b.dataset.themePick)));
   document.querySelectorAll("a.item").forEach((a) => (a.onclick = (e) => { if (tg && tg.openTelegramLink) { e.preventDefault(); tg.openTelegramLink(a.href); } }));
   bindCommon();
@@ -711,37 +727,138 @@ async function renderHelp() {
   $("#copyTpl").onclick = () => { navigator.clipboard && navigator.clipboard.writeText(s.code); $("#copyTpl").textContent = "Скопировано"; haptic("success"); };
 }
 
-// ───────── Регистрация ─────────
-function renderRegister() {
-  setBack(false);
+// ───────── Компания: создание, вступление, выход ─────────
+async function reloadMe() {
+  S.me = await api("/api/v2/me");
+  S.me.prefs = S.me.prefs || {};
+}
+
+function confirmBox(text) {
+  return new Promise((res) => {
+    try { if (tg && tg.showConfirm && INIT) return tg.showConfirm(text, (ok) => res(!!ok)); } catch (e) {}
+    res(window.confirm(text));
+  });
+}
+
+async function leaveCompany() {
+  if (!(await confirmBox(`Выйти из компании «${S.me.company.name}»? Ваши отчёты и выплаты останутся у компании, а вы сможете вступить в другую команду или создать свою.`))) return;
+  try {
+    await api("/api/v2/me/leave", { method: "POST", body: "{}" });
+    haptic("success"); await reloadMe(); location.hash = "#/welcome"; router();
+  } catch (e) { toast("Не получилось", e.message, "error"); }
+}
+
+function phoneField(state) {
+  return `<div class="field" style="display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted)">Телефон
+    <button type="button" class="btn ghost" id="phoneBtn">${state.phone ? esc(state.phone) : "Поделиться номером из Telegram"}</button></div>`;
+}
+function bindPhone(state, errSel) {
+  $("#phoneBtn").onclick = () => {
+    if (!tg || !tg.requestContact) { $(errSel).textContent = "Номер можно отправить только из Telegram"; return; }
+    tg.requestContact((ok, res) => {
+      if (!ok) return;
+      const p = res && res.responseUnsafe && res.responseUnsafe.contact && res.responseUnsafe.contact.phone_number;
+      state.phone = p || "отправлен"; $("#phoneBtn").textContent = p ? "+" + String(p).replace(/^\+/, "") : "Номер отправлен"; haptic("success");
+    });
+  };
+}
+
+/** Нет компании: регистрация руководителя — создание своей компании */
+function renderWelcome() {
+  setBack(false); renderTabs("");
   const name = [TG_USER.first_name, TG_USER.last_name].filter(Boolean).join(" ");
-  let role = null, phone = S.me && S.me.phone;
+  const state = { phone: S.me && S.me.phone };
   view(`
-    <div style="display:flex;flex-direction:column;gap:6px;padding-top:8px"><h1>Добро пожаловать!</h1><p class="muted" style="margin:0">Здесь считаются ваши результаты, бонусы и зарплата. Заполните анкету — админ одобрит её, и всё заработает.</p></div>
+    <div style="display:flex;flex-direction:column;gap:8px;padding-top:8px">
+      <span class="ico" style="width:56px;height:56px;border-radius:18px">${ico("building", 28)}</span>
+      <h1>Создайте свою компанию</h1>
+      <p class="muted" style="margin:0">Рейтинг, бонусы и зарплата команды — в одном боте. Создайте компанию, подключите рабочий чат и пригласите сотрудников по ссылке.</p>
+    </div>
+    <form id="co" class="card" style="display:flex;flex-direction:column;gap:14px" novalidate>
+      <label class="field">Название компании или отдела<input name="name" required maxlength="60" placeholder="Например, Отдел подбора «Север»"></label>
+      <label class="field">Ваше ФИО<input name="fullName" autocomplete="name" required value="${esc(name)}" placeholder="Иванов Олег Петрович"></label>
+      <label class="field">Город<input name="city" autocomplete="address-level2" placeholder="Москва"></label>
+      ${phoneField(state)}
+      <div class="error" id="coErr" role="alert"></div>
+      <button class="btn" id="coBtn" type="submit">Создать компанию</button>
+    </form>
+    <div class="card" style="display:flex;gap:12px;align-items:flex-start">
+      <span class="ico">${ico("users")}</span>
+      <div><b>Вы сотрудник?</b><p class="small muted" style="margin:4px 0 0">Попросите у руководителя ссылку-приглашение и откройте её — анкета откроется сама.</p></div>
+    </div>`, { noNav: true });
+  bindPhone(state, "#coErr");
+  $("#co").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const companyName = String(f.get("name") || "").trim();
+    const fullName = String(f.get("fullName") || "").trim();
+    if (companyName.length < 2) return ($("#coErr").textContent = "Укажите название компании");
+    if (fullName.split(/\s+/).length < 2) return ($("#coErr").textContent = "Укажите имя и фамилию");
+    if (DEMO) return ($("#coErr").textContent = "В демо компания не создаётся. Откройте приложение из Telegram.");
+    $("#coBtn").disabled = true; $("#coErr").textContent = "";
+    try {
+      await api("/api/v2/company", { method: "POST", body: JSON.stringify({ name: companyName, fullName, city: f.get("city"), phone: state.phone && state.phone !== "отправлен" ? state.phone : undefined }) });
+      haptic("success"); confetti(); playNotes(SOUND.fanfare);
+      await reloadMe(); location.hash = "#/admin/company"; router();
+    } catch (err) { $("#coErr").textContent = err.message; $("#coBtn").disabled = false; }
+  };
+}
+
+/** Вступление в команду по ссылке-приглашению */
+async function renderJoin(code) {
+  setBack(false); renderTabs("");
+  view(`<div class="empty">Открываем приглашение…</div>`, { noNav: true });
+  let d;
+  try { d = await api(`/api/v2/join/${code}`); }
+  catch (e) {
+    JOIN = null;
+    return view(`<div class="card" style="display:flex;flex-direction:column;gap:12px;margin-top:24px"><h2>Ссылка не работает</h2><p class="muted" style="margin:0">${esc(e.message)}</p><button class="btn" id="goOn">Продолжить</button></div>`, { noNav: true }), ($("#goOn").onclick = () => { location.hash = "#/home"; router(); });
+  }
+  const c = d.company;
+  const head = `<div style="display:flex;flex-direction:column;gap:8px;padding-top:8px">
+      <span class="ico" style="width:56px;height:56px;border-radius:18px">${ico("users", 28)}</span>
+      <h1>Вас пригласили в «${esc(c.name)}»</h1>
+      <p class="muted" style="margin:0">${c.owner ? `Руководитель — ${esc(c.owner)}. ` : ""}${c.members ? `В команде уже ${c.members} ${plural(c.members, "человек", "человека", "человек")}.` : ""} Заполните анкету — руководитель одобрит её, и ваши отчёты начнут засчитываться.</p>
+    </div>`;
+  const done = () => { JOIN = null; location.hash = "#/home"; router(); };
+  if (d.me.inThis) {
+    if (d.me.status === "pending") { JOIN = null; return renderPending(); }
+    if (d.me.status === "active") return done();
+  }
+  if (d.me.current) {
+    if (d.me.current.isOwner) {
+      return view(`${head}<div class="card" style="display:flex;flex-direction:column;gap:12px"><b>Вы руководитель компании «${esc(d.me.current.name)}»</b><p class="small muted" style="margin:0">Владелец не может перейти в другую компанию. Если нужно — попросите пригласившего добавить вас иначе или используйте другой аккаунт Telegram.</p><button class="btn ghost" id="goOn">Вернуться в свою компанию</button></div>`, { noNav: true }), ($("#goOn").onclick = done);
+    }
+    view(`${head}<div class="card" style="display:flex;flex-direction:column;gap:12px"><b>Сейчас вы в команде «${esc(d.me.current.name)}»</b><p class="small muted" style="margin:0">Состоять можно только в одной компании. Чтобы вступить в «${esc(c.name)}», выйдите из текущей — ваши отчёты и выплаты останутся у неё.</p><button class="btn" id="switchCo">Выйти и вступить</button><button class="btn ghost" id="goOn">Остаться в «${esc(d.me.current.name)}»</button></div>`, { noNav: true });
+    $("#goOn").onclick = done;
+    $("#switchCo").onclick = async () => {
+      try { await api("/api/v2/me/leave", { method: "POST", body: "{}" }); await reloadMe(); renderJoin(code); }
+      catch (e) { toast("Не получилось", e.message, "error"); }
+    };
+    return;
+  }
+  const name = [TG_USER.first_name, TG_USER.last_name].filter(Boolean).join(" ");
+  const state = { phone: S.me && S.me.phone };
+  let role = null;
+  view(`${head}
     <form id="reg" class="card" style="display:flex;flex-direction:column;gap:14px" novalidate>
       <label class="field">ФИО<input name="fullName" autocomplete="name" required value="${esc(name)}" placeholder="Иванова Анна Сергеевна"></label>
       <label class="field">Город<input name="city" autocomplete="address-level2" placeholder="Москва"></label>
-      <div class="field" style="display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted)">Телефон
-        <button type="button" class="btn ghost" id="phoneBtn">${phone ? esc(phone) : "Поделиться номером из Telegram"}</button></div>
+      ${phoneField(state)}
       <div style="display:flex;flex-direction:column;gap:8px"><span class="small muted">Кто вы в команде</span>
         <div class="grid2">
           <button type="button" class="role-card" data-role="qualifier" aria-pressed="false"><b>Квалификатор</b><span class="small muted">Обрабатываю недозвоны и собираю анкеты</span></button>
           <button type="button" class="role-card" data-role="recruiter" aria-pressed="false"><b>Рекрутер</b><span class="small muted">Веду кандидатов до контракта</span></button>
         </div>
       </div>
-      <div class="notice">Роль выбирается один раз. Сменить её потом можно только через админа.</div>
+      <div class="notice">Роль выбирается один раз. Сменить её потом может только руководитель.</div>
       <div class="error" id="regErr" role="alert"></div>
       <button class="btn" id="regBtn" type="submit">Отправить анкету</button>
-    </form>`, { noNav: true });
+    </form>
+    <button class="btn ghost" id="ownCo">Я руководитель — создать свою компанию</button>`, { noNav: true });
   document.querySelectorAll("[data-role]").forEach((b) => (b.onclick = () => { role = b.dataset.role; haptic(); document.querySelectorAll("[data-role]").forEach((x) => x.setAttribute("aria-pressed", x === b)); }));
-  $("#phoneBtn").onclick = () => {
-    if (!tg || !tg.requestContact) { $("#regErr").textContent = "Номер можно отправить только из Telegram"; return; }
-    tg.requestContact((ok, res) => {
-      if (!ok) return;
-      const p = res && res.responseUnsafe && res.responseUnsafe.contact && res.responseUnsafe.contact.phone_number;
-      phone = p || "отправлен"; $("#phoneBtn").textContent = p ? "+" + String(p).replace(/^\+/, "") : "Номер отправлен"; haptic("success");
-    });
-  };
+  bindPhone(state, "#regErr");
+  $("#ownCo").onclick = () => { JOIN = null; location.hash = "#/welcome"; router(); };
   $("#reg").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -751,24 +868,28 @@ function renderRegister() {
     if (DEMO) return ($("#regErr").textContent = "В демо анкета не отправляется. Откройте приложение из Telegram.");
     $("#regBtn").disabled = true; $("#regErr").textContent = "";
     try {
-      await api("/api/v2/register", { method: "POST", body: JSON.stringify({ fullName, city: f.get("city"), role, phone: phone && phone !== "отправлен" ? phone : undefined }) });
-      haptic("success"); S.me.status = "pending"; S.me.role = role; S.me.registered = true; location.hash = "#/home"; renderPending();
+      await api(`/api/v2/join/${code}`, { method: "POST", body: JSON.stringify({ fullName, city: f.get("city"), role, phone: state.phone && state.phone !== "отправлен" ? state.phone : undefined }) });
+      haptic("success"); JOIN = null; await reloadMe(); renderPending();
     } catch (err) { $("#regErr").textContent = err.message; $("#regBtn").disabled = false; }
   };
 }
 
 function renderPending() {
   setBack(false);
+  const co = S.me && S.me.company ? `«${esc(S.me.company.name)}»` : "компании";
   view(`<div class="card" style="display:flex;flex-direction:column;gap:12px;align-items:flex-start;margin-top:24px">
     <span class="ico" style="width:56px;height:56px;border-radius:18px">${ico("clock", 28)}</span>
-    <h2>Анкета у админа</h2>
-    <p class="muted" style="margin:0">Как только её одобрят, бот пришлёт сообщение, а здесь появятся баланс и рейтинг. Обычно это занимает несколько часов.</p>
-    <button class="btn ghost" onclick="location.reload()">Проверить ещё раз</button></div>`, { noNav: true });
+    <h2>Анкета у руководителя ${co}</h2>
+    <p class="muted" style="margin:0">Как только её одобрят, бот пришлёт сообщение, а здесь появятся баланс и рейтинг.</p>
+    <button class="btn ghost" onclick="location.reload()">Проверить ещё раз</button>
+    ${S.me && S.me.company ? `<button class="btn ghost" id="leaveCo" style="color:var(--warn)">Отменить заявку</button>` : ""}</div>`, { noNav: true });
+  const l = $("#leaveCo");
+  if (l) l.onclick = () => leaveCompany();
 }
 
 // ───────── Новые уведомления при открытии ─────────
 async function greetNotifications() {
-  if (DEMO || !S.me.unread) return;
+  if (DEMO || !S.me.unread || !S.me.company || JOIN) return;
   try {
     const notes = (await api("/api/v2/notifications")).filter((n) => !n.read_at);
     if (!notes.length) return;

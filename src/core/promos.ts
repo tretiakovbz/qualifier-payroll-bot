@@ -12,6 +12,7 @@ import { getSettings } from "./settings.ts";
 import { createAccrual } from "./accruals.ts";
 import { metricTotals, pickWinners, shareOf, METRICS, type Metric } from "./bonuses.ts";
 import { notify } from "./notify.ts";
+import { cid } from "./tenant.ts";
 
 export type PromoKind = "multiplier" | "threshold" | "contest" | "news";
 
@@ -47,7 +48,7 @@ function normalize(r: any): Promo {
 }
 
 export async function listPromos(): Promise<Promo[]> {
-  return (await db`SELECT * FROM promotions ORDER BY ends_on DESC, id DESC`).map(normalize);
+  return (await db`SELECT * FROM promotions WHERE company_id = ${cid()} ORDER BY ends_on DESC, id DESC`).map(normalize);
 }
 
 export class PromoError extends Error {}
@@ -83,10 +84,10 @@ export async function savePromo(p: Partial<Promo> & { name: string; kind: PromoK
     [row] = await db`UPDATE promotions SET name = ${vals.name}, kind = ${vals.kind}, role = ${vals.role}, metric = ${vals.metric},
       multiplier = ${vals.multiplier}, threshold = ${vals.threshold}, amount = ${vals.amount}, period = ${vals.period},
       weekdays = ${vals.weekdays}::text::jsonb, starts_on = ${starts}, ends_on = ${ends}, enabled = ${vals.enabled},
-      split_ties = ${vals.split}, updated_at = now() WHERE id = ${p.id} RETURNING *`;
+      split_ties = ${vals.split}, updated_at = now() WHERE id = ${p.id} AND company_id = ${cid()} RETURNING *`;
   } else {
-    [row] = await db`INSERT INTO promotions(name, kind, role, metric, multiplier, threshold, amount, period, weekdays, starts_on, ends_on, enabled, split_ties, created_by)
-      VALUES(${vals.name}, ${vals.kind}, ${vals.role}, ${vals.metric}, ${vals.multiplier}, ${vals.threshold}, ${vals.amount}, ${vals.period},
+    [row] = await db`INSERT INTO promotions(company_id, name, kind, role, metric, multiplier, threshold, amount, period, weekdays, starts_on, ends_on, enabled, split_ties, created_by)
+      VALUES(${cid()}, ${vals.name}, ${vals.kind}, ${vals.role}, ${vals.metric}, ${vals.multiplier}, ${vals.threshold}, ${vals.amount}, ${vals.period},
         ${vals.weekdays}::text::jsonb, ${starts}, ${ends}, ${vals.enabled}, ${vals.split}, ${actor}) RETURNING *`;
   }
   await audit(actor, "promo.save", row);
@@ -95,7 +96,7 @@ export async function savePromo(p: Partial<Promo> & { name: string; kind: PromoK
 
 /** Доплата по акциям-множителям к деньгам за подтверждённый отчёт. Возвращает сумму доплат. */
 export async function applyMultipliers(r: { uid: number; role: Role; day: string; base: number; chat: number; msg: number }): Promise<number> {
-  const promos = await db`SELECT * FROM promotions WHERE enabled AND kind = 'multiplier'
+  const promos = await db`SELECT * FROM promotions WHERE company_id = ${cid()} AND enabled AND kind = 'multiplier'
     AND (role = 'all' OR role = ${r.role}) AND ${r.day}::date BETWEEN starts_on AND ends_on`;
   const dow = parseDay(r.day).getUTCDay();
   let total = 0;
@@ -139,7 +140,7 @@ function periodsOf(p: Promo, upTo: string): { key: string; period: Period }[] {
 export async function runDuePromos(day = today()): Promise<{ promo: string; key: string; winners: number }[]> {
   const s = await getSettings();
   const out = [];
-  const promos = (await db`SELECT * FROM promotions WHERE enabled AND kind IN ('threshold','contest') AND ends_on >= ${addDays(day, -60)}`).map(normalize);
+  const promos = (await db`SELECT * FROM promotions WHERE company_id = ${cid()} AND enabled AND kind IN ('threshold','contest') AND ends_on >= ${addDays(day, -60)}`).map(normalize);
   for (const p of promos) {
     if (p.role === "all" || !p.metric) continue;
     for (const { key, period } of periodsOf(p, day)) {
@@ -184,9 +185,9 @@ export interface Story {
 const storyNorm = (r: any): Story => ({ ...r, id: Number(r.id), starts_on: ds(r.starts_on), ends_on: ds(r.ends_on) });
 
 export async function listStories(opts: { role?: Role; day?: string; all?: boolean } = {}): Promise<Story[]> {
-  if (opts.all) return (await db`SELECT * FROM stories ORDER BY active DESC, ends_on DESC, id DESC LIMIT 100`).map(storyNorm);
+  if (opts.all) return (await db`SELECT * FROM stories WHERE company_id = ${cid()} ORDER BY active DESC, ends_on DESC, id DESC LIMIT 100`).map(storyNorm);
   const day = opts.day ?? today();
-  const rows = await db`SELECT * FROM stories WHERE active AND ${day}::date BETWEEN starts_on AND ends_on
+  const rows = await db`SELECT * FROM stories WHERE company_id = ${cid()} AND active AND ${day}::date BETWEEN starts_on AND ends_on
     AND (role = 'all' OR role = ${opts.role ?? "all"}) ORDER BY id DESC`;
   return rows.map(storyNorm);
 }
@@ -204,16 +205,16 @@ export async function saveStory(st: Partial<Story> & { title: string }, actor: n
   if (st.id) {
     [row] = await db`UPDATE stories SET title = ${title}, body = ${st.body ?? null}, big = ${st.big ?? null}, style = ${style},
       role = ${role}, promo_id = ${st.promo_id ?? null}, starts_on = ${starts}, ends_on = ${ends}, active = ${st.active ?? true}
-      WHERE id = ${st.id} RETURNING *`;
+      WHERE id = ${st.id} AND company_id = ${cid()} RETURNING *`;
   } else {
-    [row] = await db`INSERT INTO stories(title, body, big, style, role, promo_id, starts_on, ends_on, created_by)
-      VALUES(${title}, ${st.body ?? null}, ${st.big ?? null}, ${style}, ${role}, ${st.promo_id ?? null}, ${starts}, ${ends}, ${actor}) RETURNING *`;
+    [row] = await db`INSERT INTO stories(company_id, title, body, big, style, role, promo_id, starts_on, ends_on, created_by)
+      VALUES(${cid()}, ${title}, ${st.body ?? null}, ${st.big ?? null}, ${style}, ${role}, ${st.promo_id ?? null}, ${starts}, ${ends}, ${actor}) RETURNING *`;
   }
   await audit(actor, "story.save", row);
   return storyNorm(row);
 }
 
 export async function hideStory(id: number, actor: number) {
-  await db`UPDATE stories SET active = FALSE WHERE id = ${id}`;
+  await db`UPDATE stories SET active = FALSE WHERE id = ${id} AND company_id = ${cid()}`;
   await audit(actor, "story.hide", { id });
 }

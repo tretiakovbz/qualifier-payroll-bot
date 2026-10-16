@@ -1,4 +1,5 @@
 import { db } from "./client.ts";
+import { tryCid } from "../core/tenant.ts";
 
 /** JSON-значение для jsonb-колонки */
 export const json = (v: unknown) => JSON.stringify(v ?? null);
@@ -8,5 +9,5 @@ export const pgTextArray = (list: string[]) => "{" + list.map((s) => '"' + s.rep
 
 /** Запись в журнал действий админов */
 export async function audit(actor: number | null, action: string, payload: unknown = {}) {
-  await db`INSERT INTO audit_log(actor, action, payload) VALUES(${actor}, ${action}, ${json(payload)}::text::jsonb)`;
+  await db`INSERT INTO audit_log(actor, action, payload, company_id) VALUES(${actor}, ${action}, ${json(payload)}::text::jsonb, ${tryCid()})`;
 }

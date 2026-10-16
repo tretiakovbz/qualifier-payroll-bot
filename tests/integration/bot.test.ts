@@ -72,10 +72,14 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     app = mod.server;
     base = `http://localhost:${app!.port}`;
     M.db = db;
-    M.settings = await import("../../src/core/settings.ts");
-    M.accruals = await import("../../src/core/accruals.ts");
-    M.salary = await import("../../src/core/salary.ts");
-    M.bonuses = await import("../../src/core/bonuses.ts");
+    // Прямые вызовы модулей — внутри компании № 1 (в неё переносятся данные однокомпанийной версии)
+    const { withCompany } = await import("../../src/core/tenant.ts");
+    const scoped = (mod: any) => new Proxy(mod, { get: (t, k) => (typeof t[k] === "function" ? (...a: any[]) => withCompany(1, () => t[k](...a)) : t[k]) });
+    M.withCompany = withCompany;
+    M.settings = scoped(await import("../../src/core/settings.ts"));
+    M.accruals = scoped(await import("../../src/core/accruals.ts"));
+    M.salary = scoped(await import("../../src/core/salary.ts"));
+    M.bonuses = scoped(await import("../../src/core/bonuses.ts"));
     M.time = await import("../../src/lib/time.ts");
     await M.settings.updateSettings({ startDate: "2000-01-01" }, OWNER);
   }, 30_000);
@@ -108,7 +112,7 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
 
   test("перенос v1: сотрудники стали квалификаторами, подтверждённые анкеты — начислениями", async () => {
     const e = await M.db`SELECT uid, role, status FROM employees ORDER BY uid`;
-    expect(e.map((r: any) => [Number(r.uid), r.role, r.status])).toEqual([[7, "qualifier", "active"], [9, "qualifier", "active"], [100, null, "new"]]);
+    expect(e.map((r: any) => [Number(r.uid), r.role, r.status])).toEqual([[7, "qualifier", "active"], [9, "qualifier", "active"], [100, null, "active"]]);
     expect(await activeSum(7, "form")).toBe(2000); // 4 анкеты × 500, неподтверждённый не засчитан
     const maria = await M.db`SELECT period_start::text AS p FROM accruals WHERE uid = 9`;
     expect(maria[0].p).toBe("2026-09-20"); // 25 сентября → период 20.09–04.10
@@ -159,18 +163,24 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     expect(await activeSum(7, "form")).toBe(5000);
   });
 
-  test("незарегистрированный: отчёт сохранён, подсказка про регистрацию", async () => {
+  test("не из команды: отчёт не засчитан, бот даёт ссылку-приглашение этой компании", async () => {
     sent.length = 0;
     await hook(groupMsg(STRANGER, "#отчет\nАнкет собрано: 3"));
-    expect(lastText(GROUP)).toContain("зарегистрируйтесь");
+    expect(lastText(GROUP)).toContain("вступите в команду");
+    const last = [...sent].reverse().find((x) => x.method === "sendMessage");
+    expect(last?.body.reply_markup.inline_keyboard[0][0].url).toContain("startapp=join_");
     const r = await M.db`SELECT status FROM reports WHERE uid = 77`;
-    expect(r[0].status).toBe("pending");
+    expect(r.length).toBe(0);
   });
 
   test("регистрация рекрутера: заявка админам, одобрение кнопкой, приветствие", async () => {
     await hook(privateMsg(IGOR, "/start"));
     sent.length = 0;
-    const r = await api("/api/v2/register", IGOR, { method: "POST", body: JSON.stringify({ fullName: "Игорь Петров", city: "Москва", role: "recruiter" }) });
+    const co = await (await api("/api/v2/admin/company", { id: OWNER })).json();
+    const code = co.inviteLink.split("join_")[1];
+    const preview = await (await api(`/api/v2/join/${code}`, IGOR)).json();
+    expect(preview.company.name).toBe("Моя команда");
+    const r = await api(`/api/v2/join/${code}`, IGOR, { method: "POST", body: JSON.stringify({ fullName: "Игорь Петров", city: "Москва", role: "recruiter" }) });
     expect(r.status).toBe(200);
     expect((await r.json()).status).toBe("pending");
     const toOwner = sent.find((s) => s.method === "sendMessage" && s.body.chat_id === OWNER);
@@ -178,7 +188,7 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     expect(toOwner?.body.reply_markup.inline_keyboard[0][0].callback_data).toBe("reg:ok:8");
 
     // повторная заявка не принимается
-    const again = await api("/api/v2/register", IGOR, { method: "POST", body: JSON.stringify({ fullName: "Игорь", role: "qualifier" }) });
+    const again = await api(`/api/v2/join/${code}`, IGOR, { method: "POST", body: JSON.stringify({ fullName: "Игорь", role: "qualifier" }) });
     expect(again.status).toBe(400);
 
     sent.length = 0;
@@ -276,8 +286,8 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
 
   test("главная: место в рейтинге и прогресс к бонусу считаются по своим отчётам", async () => {
     const week = M.time.weekOf(M.time.today(), { startDow: 0, days: 5 });
-    await M.db`INSERT INTO reports(chat, msg, uid, name, n, day, status, role, metrics) VALUES
-      (${GROUP}, 9501, 7, 'Анна', 15, ${week[0]}, 'pending', 'qualifier', '{"forms":15,"calls":40}')`;
+    await M.db`INSERT INTO reports(chat, msg, uid, name, n, day, status, role, metrics, company_id) VALUES
+      (${GROUP}, 9501, 7, 'Анна', 15, ${week[0]}, 'pending', 'qualifier', '{"forms":15,"calls":40}', 1)`;
     await M.db`UPDATE bonus_rules SET enabled = TRUE WHERE kind = 'top_metric' AND metric = 'forms' AND role = 'qualifier'`;
     const me = await (await api("/api/v2/me", ANNA)).json();
     expect(me.place.place).toBe(1);
@@ -298,11 +308,11 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
   test("автобонус «лучший по анкетам»: порог и деление при ничьей", async () => {
     const week = ["2026-08-02", "2026-08-06"]; // неделя без других отчётов
     const d = (i: number) => M.time.addDays(week[0], i);
-    await M.db`INSERT INTO reports(chat, msg, uid, name, n, day, status, role, metrics) VALUES
-      (${GROUP}, 9001, 7, 'Анна', 12, ${d(0)}, 'approved', 'qualifier', '{"forms":12,"calls":50}'),
-      (${GROUP}, 9002, 7, 'Анна', 10, ${d(1)}, 'approved', 'qualifier', '{"forms":10,"calls":40}'),
-      (${GROUP}, 9003, 9, 'Мария', 22, ${d(2)}, 'approved', 'qualifier', '{"forms":22,"calls":20}'),
-      (${GROUP}, 9004, 9, 'Мария', 30, ${d(3)}, 'pending', 'qualifier', '{"forms":30,"calls":0}')`;
+    await M.db`INSERT INTO reports(chat, msg, uid, name, n, day, status, role, metrics, company_id) VALUES
+      (${GROUP}, 9001, 7, 'Анна', 12, ${d(0)}, 'approved', 'qualifier', '{"forms":12,"calls":50}', 1),
+      (${GROUP}, 9002, 7, 'Анна', 10, ${d(1)}, 'approved', 'qualifier', '{"forms":10,"calls":40}', 1),
+      (${GROUP}, 9003, 9, 'Мария', 22, ${d(2)}, 'approved', 'qualifier', '{"forms":22,"calls":20}', 1),
+      (${GROUP}, 9004, 9, 'Мария', 30, ${d(3)}, 'pending', 'qualifier', '{"forms":30,"calls":0}', 1)`;
     const rules = await M.bonuses.listRules();
     const forms = rules.find((r: any) => r.code === "top_forms_week");
     const r1 = await M.bonuses.evaluateRule({ ...forms, enabled: true }, week);
@@ -436,11 +446,11 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
   });
 
   test("акция-порог и конкурс подводятся после окончания и не задваиваются", async () => {
-    M.promos = await import("../../src/core/promos.ts");
+    M.promos = new Proxy(await import("../../src/core/promos.ts"), { get: (t: any, k) => (typeof t[k] === "function" ? (...a: any[]) => M.withCompany(1, () => t[k](...a)) : t[k]) });
     const owner = { id: OWNER };
-    await M.db`INSERT INTO reports(chat, msg, uid, name, n, day, status, role, metrics) VALUES
-      (${GROUP}, 9101, 7, 'Анна', 21, '2026-09-28', 'approved', 'qualifier', '{"forms":21}'),
-      (${GROUP}, 9102, 9, 'Мария', 21, '2026-09-29', 'approved', 'qualifier', '{"forms":21}')`;
+    await M.db`INSERT INTO reports(chat, msg, uid, name, n, day, status, role, metrics, company_id) VALUES
+      (${GROUP}, 9101, 7, 'Анна', 21, '2026-09-28', 'approved', 'qualifier', '{"forms":21}', 1),
+      (${GROUP}, 9102, 9, 'Мария', 21, '2026-09-29', 'approved', 'qualifier', '{"forms":21}', 1)`;
     await api("/api/v2/admin/promos", owner, { method: "POST", body: JSON.stringify({ name: "20 анкет", kind: "threshold", role: "qualifier", metric: "forms", threshold: 20, amount: 3000, period: "range", starts_on: "2026-09-27", ends_on: "2026-10-01" }) });
     await api("/api/v2/admin/promos", owner, { method: "POST", body: JSON.stringify({ name: "Конкурс", kind: "contest", role: "qualifier", metric: "forms", threshold: 1, amount: 9000, starts_on: "2026-09-27", ends_on: "2026-10-01" }) });
     const first = await M.promos.runDuePromos(M.time.today());
@@ -504,5 +514,97 @@ describe.skipIf(!DB_URL)("бот v2 целиком", () => {
     expect(rec.items.find((x: any) => x.code === "contract_1").done).toBe(true);
     const me = await (await api("/api/v2/me", ANNA)).json();
     expect(me.achievements.total).toBe(12);
+  });
+
+  // ───────────── Много компаний ─────────────
+  const BOSS2 = { id: 200, first_name: "Олег", username: "oleg_boss" };
+  const EMP2 = { id: 201, first_name: "Света" };
+  const GROUP2 = -2002;
+  const post = (path: string, user: any, data: unknown) => api(path, user, { method: "POST", body: JSON.stringify(data) });
+  let invite2 = "";
+
+  test("руководитель создаёт свою компанию — пустую, со своими настройками", async () => {
+    await hook(privateMsg(BOSS2, "/start"));
+    const before = await (await api("/api/v2/me", BOSS2)).json();
+    expect(before.company).toBeNull();
+    const r = await post("/api/v2/company", BOSS2, { name: "Продажи Плюс", fullName: "Олег Иванов", city: "Казань" });
+    expect(r.status).toBe(200);
+    const me = await (await api("/api/v2/me", BOSS2)).json();
+    expect([me.company.name, me.company.isOwner, me.adminLevel]).toEqual(["Продажи Плюс", true, "owner"]);
+    // данные компании № 1 не видны
+    const people = await (await api("/api/v2/admin/employees", BOSS2)).json();
+    expect(people.map((e: any) => e.uid)).toEqual([200]);
+    const reports = await (await api("/api/v2/admin/reports", BOSS2)).json();
+    expect(reports.length).toBe(0);
+    // настройки свои: меняем — у компании № 1 не меняется
+    const rate1 = (await M.settings.getSettings()).rates.perForm;
+    const put = await api("/api/v2/admin/settings", BOSS2, { method: "PUT", body: JSON.stringify({ rates: { perForm: 900 } }) });
+    expect(put.status).toBe(200);
+    expect((await M.settings.getSettings()).rates.perForm).toBe(rate1);
+    // вторую компанию создать нельзя
+    expect((await post("/api/v2/company", BOSS2, { name: "Ещё", fullName: "Олег" })).status).toBe(400);
+    // в чужую карточку не попасть
+    expect((await api("/api/v2/admin/employees/7", BOSS2)).status).toBe(404);
+    const co = await (await api("/api/v2/admin/company", BOSS2)).json();
+    invite2 = co.inviteLink.split("join_")[1];
+    expect(co.bindLink).toContain("startgroup=bind_");
+  });
+
+  test("рабочий чат подключается ссылкой, отчёты идут в свою компанию", async () => {
+    const co = await (await api("/api/v2/admin/company", BOSS2)).json();
+    const bind = co.bindLink.split("bind_")[1].split("&")[0];
+    // посторонний подключить не может
+    sent.length = 0;
+    await hook({ message: { message_id: ++msgId, date: now, chat: { id: GROUP2, type: "group", title: "Отдел продаж" }, from: STRANGER, text: `/start bind_${bind}` } });
+    expect(lastText(GROUP2)).toContain("только руководитель");
+    await hook({ message: { message_id: ++msgId, date: now, chat: { id: GROUP2, type: "group", title: "Отдел продаж" }, from: BOSS2, text: `/start@bot bind_${bind}` } });
+    expect(lastText(GROUP2)).toContain("Продажи Плюс");
+    const after = await (await api("/api/v2/admin/company", BOSS2)).json();
+    expect(after.group.title).toBe("Отдел продаж");
+    // сотрудник вступает по ссылке и после одобрения отчитывается во втором чате
+    await hook(privateMsg(EMP2, "/start join_" + invite2));
+    expect(sent.at(-1)?.body.reply_markup.inline_keyboard[0][0].web_app.url).toContain("join=" + invite2);
+    expect((await post(`/api/v2/join/${invite2}`, EMP2, { fullName: "Светлана Котова", role: "qualifier" })).status).toBe(200);
+    expect((await post("/api/v2/admin/employees/201", BOSS2, { action: "approve" })).status).toBe(200);
+    expect((await post("/api/v2/admin/employees/201", { id: OWNER }, { action: "approve" })).status).toBe(404); // чужой руководитель
+    await hook({ message: { message_id: 7001, date: now, chat: { id: GROUP2, type: "group" }, from: EMP2, text: "#отчет\nОбработано недозвонов: 5\nАнкет собрано: 4" } });
+    const rep = await M.db`SELECT company_id FROM reports WHERE msg = 7001`;
+    expect(Number(rep[0].company_id)).toBe(2);
+    await post("/api/v2/admin/reports/7001", BOSS2, { status: "approved" });
+    const acc = await M.db`SELECT amount, company_id FROM accruals WHERE uid = 201 AND kind = 'form'`;
+    expect([acc[0].amount, Number(acc[0].company_id)]).toEqual([3600, 2]); // ставка компании № 2: 900 ₽
+    // в первой компании этих денег и людей нет
+    const p1 = await (await api("/api/v2/admin/employees", { id: OWNER })).json();
+    expect(p1.some((e: any) => e.uid === 201)).toBe(false);
+  });
+
+  test("сотрудник выходит из компании и создаёт свою", async () => {
+    const leaveOwner = await post("/api/v2/me/leave", BOSS2, {});
+    expect(leaveOwner.status).toBe(400); // владелец не выходит
+    expect((await post("/api/v2/company", EMP2, { name: "Своё дело", fullName: "Светлана Котова" })).status).toBe(400); // сначала выйти
+    expect((await post("/api/v2/me/leave", EMP2, {})).status).toBe(200);
+    const me = await (await api("/api/v2/me", EMP2)).json();
+    expect(me.company).toBeNull();
+    // её отчёт в чате компании № 2 больше не засчитывается
+    sent.length = 0;
+    await hook({ message: { message_id: 7002, date: now, chat: { id: GROUP2, type: "group" }, from: EMP2, text: "#отчет\nАнкет собрано: 1" } });
+    expect((await M.db`SELECT 1 FROM reports WHERE msg = 7002`).length).toBe(0);
+    // история осталась у компании № 2
+    expect((await M.db`SELECT 1 FROM accruals WHERE uid = 201 AND company_id = 2`).length).toBe(1);
+    const r = await post("/api/v2/company", EMP2, { name: "Своё дело", fullName: "Светлана Котова" });
+    expect(r.status).toBe(200);
+    const me2 = await (await api("/api/v2/me", EMP2)).json();
+    expect([me2.company.name, me2.adminLevel]).toEqual(["Своё дело", "owner"]);
+    // старая ссылка-приглашение компании № 2 работает, новая — после сброса — тоже, старая нет
+    const reset = await (await post("/api/v2/admin/company", BOSS2, { resetInvite: true })).json();
+    expect(reset.inviteLink).not.toContain(invite2);
+    expect((await api(`/api/v2/join/${invite2}`, STRANGER)).status).toBe(404);
+  });
+
+  test("планировщик считает каждую компанию отдельно", async () => {
+    const { tick } = await import("../../src/core/scheduler.ts");
+    await tick(Date.now() + 10 * 60_000);
+    const sal2 = await M.db`SELECT COUNT(*)::int AS n FROM accruals WHERE company_id <> 1 AND kind = 'salary' AND cancelled_at IS NULL`;
+    expect(sal2[0].n).toBe(0); // в новых компаниях оклад начислится только тем, у кого есть роль
   });
 });

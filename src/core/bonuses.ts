@@ -2,7 +2,7 @@
 // и ручные (админ отмечает галочками, например «без 5 задержек»).
 
 import { db } from "../db/client.ts";
-import { config } from "../config.ts";
+import { cid } from "./tenant.ts";
 import { audit } from "../db/audit.ts";
 import { today, lastCompletedWeek, lastCompletedMonth, weekOf, monthOf, addDays, parseDay, nowLocal, humanRange, type Period } from "../lib/time.ts";
 import type { Role } from "../lib/report.ts";
@@ -43,11 +43,11 @@ export const METRIC_LABEL: Record<Metric, string> = {
 const rub = (n: number) => n.toLocaleString("ru-RU") + " ₽";
 
 export async function listRules(): Promise<BonusRule[]> {
-  return db`SELECT * FROM bonus_rules ORDER BY sort, id`;
+  return db`SELECT * FROM bonus_rules WHERE company_id = ${cid()} ORDER BY sort, id`;
 }
 
 export async function getRule(id: number): Promise<BonusRule | null> {
-  const rows = await db`SELECT * FROM bonus_rules WHERE id = ${id}`;
+  const rows = await db`SELECT * FROM bonus_rules WHERE id = ${id} AND company_id = ${cid()}`;
   return rows[0] ?? null;
 }
 
@@ -60,10 +60,11 @@ export async function saveRule(r: Partial<BonusRule> & { name: string; role: Rol
     [row] = await db`UPDATE bonus_rules SET name = ${r.name}, role = ${r.role}, kind = ${r.kind}, metric = ${r.metric ?? null},
       period = ${r.period}, amount = ${r.amount}, threshold = ${r.threshold ?? 0}, enabled = ${r.enabled ?? true},
       split_ties = ${r.split_ties ?? true}, updated_at = now(), updated_by = ${actor}
-      WHERE id = ${r.id} RETURNING *`;
+      WHERE id = ${r.id} AND company_id = ${cid()} RETURNING *`;
+    if (!row) throw new Error("Бонус не найден");
   } else {
-    [row] = await db`INSERT INTO bonus_rules(name, role, kind, metric, period, amount, threshold, enabled, split_ties, sort, updated_by)
-      VALUES(${r.name}, ${r.role}, ${r.kind}, ${r.metric ?? null}, ${r.period}, ${r.amount}, ${r.threshold ?? 0},
+    [row] = await db`INSERT INTO bonus_rules(company_id, name, role, kind, metric, period, amount, threshold, enabled, split_ties, sort, updated_by)
+      VALUES(${cid()}, ${r.name}, ${r.role}, ${r.kind}, ${r.metric ?? null}, ${r.period}, ${r.amount}, ${r.threshold ?? 0},
         ${r.enabled ?? true}, ${r.split_ties ?? true}, ${r.sort ?? 100}, ${actor}) RETURNING *`;
   }
   await audit(actor, "bonus_rule.save", row);
@@ -93,13 +94,13 @@ export async function metricTotals(role: Role, metric: Metric, period: Period, o
     `SELECT e.uid, COALESCE(e.full_name, e.name) AS name,
        COALESCE(SUM(${expr}) FILTER (WHERE r.msg IS NOT NULL), 0)::int AS value
      FROM employees e
-     LEFT JOIN reports r ON r.uid = e.uid AND r.chat = $1 AND r.role = $2
+     LEFT JOIN reports r ON r.uid = e.uid AND r.company_id = $1 AND r.role = $2
        AND r.day BETWEEN $3::date AND $4::date
        AND (r.status = 'approved' OR ($5::boolean AND r.status = 'pending'))
-     WHERE e.status = 'active' AND e.role = $2
+     WHERE e.company_id = $1 AND e.status = 'active' AND e.role = $2
      GROUP BY e.uid, e.full_name, e.name
      ORDER BY value DESC, name`,
-    [config.groupId, role, period[0], period[1], Boolean(opts.includePending)],
+    [cid(), role, period[0], period[1], Boolean(opts.includePending)],
   );
   return rows.map((r: any) => ({ uid: Number(r.uid), name: r.name, value: r.value }));
 }
@@ -199,7 +200,7 @@ export async function manualCandidates(rule: BonusRule, key: string) {
       a.id AS accrual_id, a.amount AS awarded
     FROM employees e
     LEFT JOIN accruals a ON a.uid = e.uid AND a.cancelled_at IS NULL AND a.dedupe_key = ${"bonus:" + rule.id + ":" + key + ":"} || e.uid
-    WHERE e.status = 'active' AND e.role = ${rule.role}
+    WHERE e.company_id = ${cid()} AND e.status = 'active' AND e.role = ${rule.role}
     ORDER BY name`;
   return { rule, key, period, staff: staff.map((r: any) => ({ ...r, uid: Number(r.uid), awarded: r.awarded ?? null })) };
 }

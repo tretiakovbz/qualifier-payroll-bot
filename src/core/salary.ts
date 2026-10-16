@@ -11,6 +11,7 @@ import { addDays, humanDay, parseDay, periodOf, periodBack, payoutDayOf, humanRa
 import type { Role } from "../lib/report.ts";
 import { getSettings, type Settings } from "./settings.ts";
 import { createAccrual, dayStr } from "./accruals.ts";
+import { cid } from "./tenant.ts";
 
 /** Рабочий ли день по настройкам недели (например, вс–чт) */
 export function isWorkDay(day: string, w: WeekConfig): boolean {
@@ -62,10 +63,10 @@ export interface SalaryPlan {
   skip: boolean;
 }
 
-type EmployeeRow = { uid: number; role: Role | null; status: string; salary_monthly: number | null; work_start: unknown; approved_at: unknown };
+type EmployeeRow = { uid: number; role: Role | null; status: string; salary_monthly: number | null; work_start: unknown; approved_at: unknown; company_id: number | null };
 
 async function employee(uid: number): Promise<EmployeeRow | null> {
-  const rows = await db`SELECT uid, role, status, salary_monthly, work_start, approved_at FROM employees WHERE uid = ${uid}`;
+  const rows = await db`SELECT uid, role, status, salary_monthly, work_start, approved_at, company_id FROM employees WHERE uid = ${uid}`;
   return (rows[0] as EmployeeRow) ?? null;
 }
 
@@ -83,14 +84,14 @@ export function workStartOf(e: Pick<EmployeeRow, "work_start">): string | null {
 export async function planSalary(uid: number, period: Period, s?: Settings, e?: EmployeeRow | null): Promise<SalaryPlan> {
   s = s ?? (await getSettings());
   e = e === undefined ? await employee(uid) : e;
-  const ov = await db`SELECT amount, comment FROM salary_overrides WHERE uid = ${uid} AND period_start = ${period[0]}`;
+  const ov = await db`SELECT amount, comment FROM salary_overrides WHERE uid = ${uid} AND period_start = ${period[0]} AND company_id = ${cid()}`;
   const override = ov[0] ? { amount: Number(ov[0].amount), comment: ov[0].comment ?? null } : null;
   const monthly = e ? monthlyOf(e, s) : 0;
   const start = e ? workStartOf(e) : null;
   const calc = calcSalary(monthly, period, s.week, start);
   // Одобрен после окончания периода — оклад за него не положен (как и раньше)
   const approvedAfter = e?.approved_at ? new Date(e.approved_at as string).toISOString().slice(0, 10) > period[1] && !start : false;
-  const skip = !e || e.status !== "active" || !e.role || period[1] < s.startDate || approvedAfter;
+  const skip = !e || Number(e.company_id) !== cid() || e.status !== "active" || !e.role || period[1] < s.startDate || approvedAfter;
 
   if (override) {
     return { period, monthly, calc, override, amount: override.amount, comment: override.comment || "оклад за период", skip: !e || period[1] < s.startDate };
@@ -109,8 +110,10 @@ export async function syncSalary(uid: number, period: Period, s?: Settings): Pro
   s = s ?? (await getSettings());
   const plan = await planSalary(uid, period, s);
   if (plan.skip) return "skipped";
-  const key = `salary:${uid}:${period[0]}`;
-  const cur = (await db`SELECT id, amount, comment FROM accruals WHERE dedupe_key = ${key} AND cancelled_at IS NULL`)[0];
+  // Ключ с компанией: человек, перешедший в другую компанию посреди периода, получит оклад и там
+  const key = `salary:${cid()}:${uid}:${period[0]}`;
+  const cur = (await db`SELECT id, amount, comment FROM accruals WHERE company_id = ${cid()} AND uid = ${uid} AND kind = 'salary'
+    AND period_start = ${period[0]} AND cancelled_at IS NULL ORDER BY id DESC LIMIT 1`)[0];
   if (cur && Number(cur.amount) === plan.amount && cur.comment === plan.comment) return "same";
   if (!cur && plan.amount <= 0) return "same";
   if (cur) await db`UPDATE accruals SET cancelled_at = now() WHERE id = ${cur.id}`;
@@ -127,7 +130,7 @@ export async function ensureSalary(day = today()): Promise<number> {
   const s = await getSettings();
   const period = periodOf(day, s.payoutDays);
   if (period[1] < s.startDate) return 0;
-  const staff = await db`SELECT uid FROM employees WHERE status = 'active' AND role IS NOT NULL`;
+  const staff = await db`SELECT uid FROM employees WHERE company_id = ${cid()} AND status = 'active' AND role IS NOT NULL`;
   let count = 0;
   for (const e of staff) {
     const r = await syncSalary(Number(e.uid), period, s);
@@ -148,14 +151,14 @@ export function salaryPeriods(s: Settings, back = 4, day = today()): Period[] {
 export async function salaryOverview(uid: number) {
   const s = await getSettings();
   const e = await employee(uid);
-  if (!e) return null;
+  if (!e || Number(e.company_id) !== cid()) return null;
   const cur = periodOf(today(), s.payoutDays);
   const periods = [];
   for (const p of salaryPeriods(s)) {
     const plan = await planSalary(uid, p, s, e);
     const acc = (await db`SELECT COALESCE(SUM(amount), 0)::int AS sum FROM accruals
-      WHERE uid = ${uid} AND kind = 'salary' AND period_start = ${p[0]} AND cancelled_at IS NULL`)[0];
-    const paid = (await db`SELECT amount FROM payments WHERE uid = ${uid} AND period = ${p[0]}`)[0];
+      WHERE uid = ${uid} AND company_id = ${cid()} AND kind = 'salary' AND period_start = ${p[0]} AND cancelled_at IS NULL`)[0];
+    const paid = (await db`SELECT amount FROM payments WHERE uid = ${uid} AND period = ${p[0]} AND company_id = ${cid()}`)[0];
     periods.push({
       period: p, label: humanRange(p), payoutDay: payoutDayOf(p),
       when: p[0] > cur[0] ? "next" : p[0] === cur[0] ? "current" : "past",
@@ -183,7 +186,7 @@ export class SalaryError extends Error {}
 async function resync(uid: number, s: Settings) {
   for (const p of salaryPeriods(s)) {
     if (p[0] > periodOf(today(), s.payoutDays)[0]) continue; // будущий начислится в свой срок
-    const paid = await db`SELECT 1 FROM payments WHERE uid = ${uid} AND period = ${p[0]}`;
+    const paid = await db`SELECT 1 FROM payments WHERE uid = ${uid} AND period = ${p[0]} AND company_id = ${cid()}`;
     if (paid.length) continue;
     await syncSalary(uid, p, s);
   }
@@ -197,8 +200,8 @@ export async function setSalaryProfile(uid: number, patch: { monthly?: number | 
     patch.monthly = Math.round(patch.monthly);
   }
   if (patch.workStart !== undefined && patch.workStart !== null && !/^\d{4}-\d{2}-\d{2}$/.test(patch.workStart)) throw new SalaryError("Дата в формате ГГГГ-ММ-ДД");
-  if (patch.monthly !== undefined) await db`UPDATE employees SET salary_monthly = ${patch.monthly} WHERE uid = ${uid}`;
-  if (patch.workStart !== undefined) await db`UPDATE employees SET work_start = ${patch.workStart} WHERE uid = ${uid}`;
+  if (patch.monthly !== undefined) await db`UPDATE employees SET salary_monthly = ${patch.monthly} WHERE uid = ${uid} AND company_id = ${cid()}`;
+  if (patch.workStart !== undefined) await db`UPDATE employees SET work_start = ${patch.workStart} WHERE uid = ${uid} AND company_id = ${cid()}`;
   await audit(actor, "salary.profile", { uid, ...patch });
   await resync(uid, s);
   return salaryOverview(uid);
@@ -210,12 +213,12 @@ export async function setSalaryOverride(uid: number, periodStart: string, amount
   const period = periodOf(periodStart, s.payoutDays);
   if (period[0] !== periodStart) throw new SalaryError("Неверный период");
   if (amount === null) {
-    await db`DELETE FROM salary_overrides WHERE uid = ${uid} AND period_start = ${period[0]}`;
+    await db`DELETE FROM salary_overrides WHERE uid = ${uid} AND period_start = ${period[0]} AND company_id = ${cid()}`;
   } else {
     if (!Number.isFinite(amount) || amount < 0 || amount > 10_000_000) throw new SalaryError("Сумма — число от 0 до 10 000 000");
     const c = (comment ?? "").trim().slice(0, 120) || null;
-    await db`INSERT INTO salary_overrides(uid, period_start, amount, comment, set_by) VALUES(${uid}, ${period[0]}, ${Math.round(amount)}, ${c}, ${actor})
-      ON CONFLICT(uid, period_start) DO UPDATE SET amount = excluded.amount, comment = excluded.comment, set_by = excluded.set_by, set_at = now()`;
+    await db`INSERT INTO salary_overrides(uid, period_start, amount, comment, set_by, company_id) VALUES(${uid}, ${period[0]}, ${Math.round(amount)}, ${c}, ${actor}, ${cid()})
+      ON CONFLICT(uid, period_start) DO UPDATE SET amount = excluded.amount, comment = excluded.comment, set_by = excluded.set_by, set_at = now(), company_id = excluded.company_id`;
   }
   await audit(actor, "salary.override", { uid, period: period[0], amount, comment });
   // Будущий период начислится сам, когда наступит; текущий и прошлые — сразу

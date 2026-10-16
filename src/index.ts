@@ -3,11 +3,11 @@
 import { config } from "./config.ts";
 import { migrate } from "./db/migrate.ts";
 import { handleUpdate } from "./bot/updates.ts";
-import { statsHandler, remindersHandler } from "./api/routes.ts";
 import { handleApiV2 } from "./api/v2.ts";
 import { startScheduler } from "./core/scheduler.ts";
 import { setupTelegram } from "./bot/setup.ts";
 import { ensureDatabase, cloneData } from "./db/clone.ts";
+import { bootstrapLegacy } from "./core/companies.ts";
 import { api } from "./lib/telegram.ts";
 
 const miniApp = Bun.file(new URL("./miniapp/index.html", import.meta.url));
@@ -18,6 +18,7 @@ if (config.databaseUrl) {
   if (cloneFrom) await ensureDatabase(config.databaseUrl, cloneFrom);
   await migrate();
   if (cloneFrom) await cloneData((await import("./db/client.ts")).db, cloneFrom);
+  await bootstrapLegacy();
   // Короткая сводка в лог: сколько кого и сколько начислено (без личных данных)
   const { db } = await import("./db/client.ts");
   const staff = await db`SELECT COALESCE(role, '—') AS role, status, COUNT(*)::int AS n FROM employees GROUP BY 1, 2 ORDER BY 1, 2`;
@@ -50,8 +51,6 @@ export const server = Bun.serve({
     const v2 = await handleApiV2(req, url);
     if (v2) return v2;
 
-    if (url.pathname === "/api/stats" && req.method === "GET") return statsHandler(req, url);
-    if (url.pathname === "/api/reminders" && req.method === "POST") return remindersHandler(req);
 
     if (url.pathname === "/telegram/webhook" && req.method === "POST") {
       // Без настроенного секрета вебхук не принимается вообще

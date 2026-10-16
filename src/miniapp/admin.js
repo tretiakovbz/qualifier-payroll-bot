@@ -65,12 +65,19 @@ const Admin = (() => {
   // ───────── Главная админки ─────────
   async function home() {
     view(`<h1>Кабинет админа</h1><div class="empty">Загружаем…</div>`);
-    const o = (A.overview = await api("/api/v2/admin/overview"));
+    const [o, co] = await Promise.all([api("/api/v2/admin/overview"), api("/api/v2/admin/company")]);
+    A.overview = o; A.company = co;
     const tile = (href, title, icon, count, tone) => `<button class="card" data-go="${href}" style="text-align:left;display:flex;flex-direction:column;gap:10px;position:relative;min-height:118px">
       ${count ? `<span style="position:absolute;top:14px;right:14px;min-width:24px;height:24px;border-radius:12px;padding:0 7px;display:grid;place-items:center;font-size:13px;font-weight:800;background:${tone};color:#0A0E1F">${count}</span>` : ""}
       <span class="ico" style="width:40px;height:40px;border-radius:13px">${ico(icon, 21)}</span><b style="font-size:15px;line-height:1.25">${title}</b></button>`;
     view(`
-      <div class="between"><h1>Кабинет админа</h1><span class="pill" style="background:rgba(255,194,75,.14);color:var(--gold)">${isOwner() ? "Владелец" : "Менеджер"}</span></div>
+      <div class="between"><div style="min-width:0"><h1>${esc(co.name)}</h1><div class="small muted">Кабинет руководителя</div></div><span class="pill" style="background:rgba(255,194,75,.14);color:var(--gold)">${isOwner() ? "Владелец" : "Менеджер"}</span></div>
+      ${!co.group || !co.staff ? `<section class="card" style="display:flex;flex-direction:column;gap:12px;border:1px solid var(--accent)">
+        <b>Запуск за две минуты</b>
+        <div class="row" style="gap:10px"><span class="pill" style="${co.group ? "" : "background:var(--accent-soft);color:var(--accent)"}">${co.group ? ico("check", 12, 3) : "1"}</span><span class="grow small">${co.group ? `Рабочий чат подключён: ${esc(co.group.title || "группа")}` : "Подключите рабочий чат, где сотрудники пишут отчёты"}</span></div>
+        <div class="row" style="gap:10px"><span class="pill" style="${co.staff ? "" : "background:var(--accent-soft);color:var(--accent)"}">${co.staff ? ico("check", 12, 3) : "2"}</span><span class="grow small">${co.staff ? `В команде ${co.staff} ${plural(co.staff, "сотрудник", "сотрудника", "сотрудников")}` : "Отправьте сотрудникам ссылку-приглашение"}</span></div>
+        <button class="btn" data-go="#/admin/company">${co.group ? "Пригласить сотрудников" : "Подключить чат и пригласить"}</button>
+      </section>` : ""}
       <div class="grid2">
         ${tile("#/admin/reports", "Отчёты на проверку", "check", o.pendingReports, "var(--warn)")}
         ${tile("#/admin/staff", "Сотрудники", "user", o.pendingRegistrations, "var(--accent)")}
@@ -79,11 +86,48 @@ const Admin = (() => {
       </div>
       ${o.manual.length ? `<div class="section-title"><h2>Ручные бонусы</h2></div><div class="list">${o.manual.map((m) => `<button class="item" data-go="#/admin/manual/${m.ruleId}"><span class="ico">${ico("gift")}</span><div class="grow"><div style="font-weight:600">${esc(m.name)}</div><div class="tiny muted">${human(m.period[0])} – ${human(m.period[1])} · отмечено ${m.awarded} из ${m.total}</div></div>${chev()}</button>`).join("")}</div>` : ""}
       <div class="list">
+        <button class="item" data-go="#/admin/company"><span class="ico">${ico("link")}</span><span class="grow">Компания и приглашения</span>${chev()}</button>
         <button class="item" data-go="#/admin/grant"><span class="ico">${ico("cash")}</span><span class="grow">Начислить бонус вручную</span>${chev()}</button>
         <button class="item" data-go="#/admin/promos"><span class="ico">${ico("gift")}</span><span class="grow">Акции и сторис</span>${chev()}</button>
       </div>
     `);
     bindCommon();
+  }
+
+  // ───────── Компания: приглашения и рабочий чат ─────────
+  async function companyView() {
+    view(`<h1>Компания</h1><div class="empty">Загружаем…</div>`);
+    const c = (A.company = await api("/api/v2/admin/company"));
+    const shareText = `Вступай в команду «${c.name}»: здесь наши отчёты, рейтинг, бонусы и зарплата.`;
+    const openLink = (url) => { try { if (tg && tg.openTelegramLink) return tg.openTelegramLink(url); } catch (e) {} window.open(url, "_blank"); };
+    view(`
+      <h1>${esc(c.name)}</h1>
+      <section class="card" style="display:flex;flex-direction:column;gap:12px">
+        <div class="row" style="gap:10px"><span class="ico">${ico("users")}</span><div class="grow"><b>Ссылка-приглашение</b><div class="tiny muted">Сотрудник открывает её, заполняет анкету, вы одобряете</div></div></div>
+        <div style="background:var(--card2);border-radius:12px;padding:12px;font-size:13px;word-break:break-all" id="inv">${esc(c.inviteLink)}</div>
+        <div class="grid2"><button class="btn" id="share">${ico("link", 18)} Поделиться</button><button class="btn ghost" id="copy">${ico("copy", 18)} Скопировать</button></div>
+        ${c.isOwner ? `<button class="tiny" style="color:var(--muted);text-align:left;padding:2px 0" id="reset">Ссылка попала не туда? Сделать новую — старая перестанет работать</button>` : ""}
+      </section>
+      <section class="card" style="display:flex;flex-direction:column;gap:12px">
+        <div class="row" style="gap:10px"><span class="ico">${ico("chat")}</span><div class="grow"><b>Рабочий чат</b><div class="tiny muted">${c.group ? `Подключён: ${esc(c.group.title || "группа")}` : "Здесь сотрудники пишут отчёты с тегом #отчет"}</div></div>${c.group ? `<span class="pill">${ico("check", 12, 3)} работает</span>` : ""}</div>
+        <p class="small muted" style="margin:0">${c.group ? "Можно подключить другой чат — старый отключится." : "Нажмите кнопку, выберите группу — Telegram предложит сделать бота администратором. Согласитесь: так бот видит отчёты в чате."}</p>
+        <button class="btn ${c.group ? "ghost" : ""}" id="bind">${c.group ? "Подключить другой чат" : "Подключить рабочий чат"}</button>
+      </section>
+      ${c.isOwner ? `<form id="rename" class="card" style="display:flex;flex-direction:column;gap:12px" novalidate>
+        <label class="field">Название компании<input name="name" maxlength="60" value="${esc(c.name)}"></label>
+        <button class="btn ghost" type="submit">Сохранить название</button>
+      </form>` : `<div class="list"><button class="item" id="leave"><span class="ico">${ico("building")}</span><span class="grow" style="color:var(--warn)">Выйти из компании</span>${chev()}</button></div>`}
+    `);
+    bindCommon();
+    $("#share").onclick = () => { haptic(); openLink(`https://t.me/share/url?url=${encodeURIComponent(c.inviteLink)}&text=${encodeURIComponent(shareText)}`); };
+    $("#copy").onclick = () => { try { navigator.clipboard.writeText(c.inviteLink); } catch (e) {} toast("Ссылка скопирована", "Отправьте её сотрудникам"); haptic("success"); };
+    $("#bind").onclick = () => { haptic(); openLink(c.bindLink); };
+    const reset = $("#reset");
+    if (reset) reset.onclick = async () => { if (await ask("Сделать новую ссылку? Старая перестанет работать.")) { await act(() => post("/api/v2/admin/company", { resetInvite: true }), "Новая ссылка готова"); companyView(); } };
+    const rn = $("#rename");
+    if (rn) rn.onsubmit = async (e) => { e.preventDefault(); await act(() => post("/api/v2/admin/company", { name: rn.name.value }), "Название сохранено"); S.me.company.name = rn.name.value.trim(); companyView(); };
+    const lv = $("#leave");
+    if (lv) lv.onclick = () => leaveCompany();
   }
 
   // ───────── Отчёты ─────────
@@ -184,8 +228,8 @@ const Admin = (() => {
       <div class="list">${e.accruals.length ? e.accruals.map((a) => `<div class="item" style="${a.cancelled ? "opacity:.45" : ""}"><div class="grow"><div style="font-weight:600">${esc(kindRu[a.kind] || a.kind)}${a.cancelled ? " · отменено" : ""}</div><div class="tiny muted">${human(a.day)}${a.comment ? " · " + esc(a.comment) : ""}</div></div><b style="color:var(--good)">${rub(a.amount)}</b>${isOwner() && !a.cancelled && a.kind !== "salary" ? `<button class="icon-btn" style="width:36px;height:36px;margin-left:6px" aria-label="Отменить начисление" data-cancel="${a.id}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>` : ""}</div>`).join("") : '<div class="empty">Начислений пока нет</div>'}</div>
       ${isOwner() && e.status === "active" ? `<div class="list">
         ${e.adminLevel !== "owner" ? `<button class="item" id="mgr"><span class="grow">${e.adminLevel === "manager" ? "Убрать из менеджеров" : "Сделать менеджером"}</span>${chev()}</button>` : ""}
-        <button class="item" id="arch"><span class="grow" style="color:var(--warn)">Удалить профиль</span>${chev()}</button></div>
-        <p class="tiny muted" style="margin:0 4px">Удаление не стирает историю отчётов и выплат. После него человек сможет зарегистрироваться заново с другой ролью.</p>` : ""}
+        <button class="item" id="arch"><span class="grow" style="color:var(--warn)">Убрать из команды</span>${chev()}</button></div>
+        <p class="tiny muted" style="margin:0 4px">История отчётов и выплат остаётся у компании. Человек сможет вступить заново по ссылке или создать свою компанию.</p>` : ""}
     `);
     bindCommon();
     const paid = $("#paid");
@@ -194,7 +238,7 @@ const Admin = (() => {
     const mgr = $("#mgr");
     if (mgr) mgr.onclick = async () => { await act(() => post(`/api/v2/admin/employees/${uid}`, { action: e.adminLevel === "manager" ? "remove_manager" : "make_manager" }), "Готово"); staffCard(uid); };
     const arch = $("#arch");
-    if (arch) arch.onclick = async () => { if (await ask(`Удалить профиль ${e.name}? История сохранится.`)) { await act(() => post(`/api/v2/admin/employees/${uid}`, { action: "archive" }), "Профиль удалён"); location.hash = "#/admin/staff"; } };
+    if (arch) arch.onclick = async () => { if (await ask(`Убрать ${e.name} из команды? История отчётов и выплат сохранится.`)) { await act(() => post(`/api/v2/admin/employees/${uid}`, { action: "archive" }), "Сотрудник убран из команды"); location.hash = "#/admin/staff"; } };
   }
 
   // ───────── Оклад сотрудника ─────────
@@ -594,6 +638,7 @@ const Admin = (() => {
     const sub = parts[2], id = parts[3];
     if (!sub) return home();
     if (sub === "reports") return reports();
+    if (sub === "company") return companyView();
     if (sub === "staff") return id ? staffCard(id) : staff();
     if (sub === "grant") return grant(params);
     if (sub === "salary" && id) return salaryView(id, params.get("ps"));

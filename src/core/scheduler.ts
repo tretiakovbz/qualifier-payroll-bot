@@ -10,6 +10,8 @@ import { runDueBonuses } from "./bonuses.ts";
 import { runDuePromos } from "./promos.ts";
 import { getSettings } from "./settings.ts";
 import { dm } from "./notify.ts";
+import { listCompanies } from "./companies.ts";
+import { cid, withCompany } from "./tenant.ts";
 
 const REMINDER_TEXT = "🔔 Ждём ваш #отчет в рабочем чате до 20:00 МСК. Если сегодня без результатов — отправьте нули. Напоминания настраиваются в профиле.";
 
@@ -20,18 +22,27 @@ export async function tick(nowMs = Date.now()) {
   if (running) return;
   running = true;
   try {
-    // Тяжёлые задачи — раз в 5 минут
-    if (nowMs - lastHeavy >= 5 * 60_000) {
-      lastHeavy = nowMs;
-      const rec = await reconcileReports();
-      const salary = await ensureSalary(today(nowMs));
-      const bonuses = await runDueBonuses(nowMs);
-      const promos = await runDuePromos(today(nowMs));
-      if (rec.created || rec.cancelled || salary || bonuses.length || promos.length) {
-        console.log("[scheduler]", JSON.stringify({ rec, salary, bonuses, promos }));
-      }
+    const heavy = nowMs - lastHeavy >= 5 * 60_000; // тяжёлые задачи — раз в 5 минут
+    if (heavy) lastHeavy = nowMs;
+    // Каждая компания — отдельно: ошибка в одной не мешает остальным
+    for (const c of await listCompanies()) {
+      await withCompany(c.id, async () => {
+        try {
+          if (heavy) {
+            const rec = await reconcileReports();
+            const salary = await ensureSalary(today(nowMs));
+            const bonuses = await runDueBonuses(nowMs);
+            const promos = await runDuePromos(today(nowMs));
+            if (rec.created || rec.cancelled || salary || bonuses.length || promos.length) {
+              console.log("[scheduler]", c.id, JSON.stringify({ rec, salary, bonuses, promos }));
+            }
+          }
+          await sendReminders(nowMs);
+        } catch (e) {
+          console.error("[scheduler] компания", c.id, e);
+        }
+      });
     }
-    await sendReminders(nowMs);
   } catch (e) {
     console.error("[scheduler]", e);
   } finally {
@@ -53,8 +64,8 @@ export async function sendReminders(nowMs = Date.now(), force = false): Promise<
   const candidates = await db`
     SELECT e.uid, COALESCE(e.prefs->>'reminderTime', ${defaultTime}) AS at
     FROM employees e
-    WHERE e.status = 'active' AND e.role IS NOT NULL AND e.can_dm = TRUE AND e.reminders = TRUE
-      AND NOT EXISTS (SELECT 1 FROM reports r WHERE r.chat = ${config.groupId} AND r.uid = e.uid AND r.day = ${day})
+    WHERE e.company_id = ${cid()} AND e.status = 'active' AND e.role IS NOT NULL AND e.can_dm = TRUE AND e.reminders = TRUE
+      AND NOT EXISTS (SELECT 1 FROM reports r WHERE r.company_id = ${cid()} AND r.uid = e.uid AND r.day = ${day})
       AND NOT EXISTS (SELECT 1 FROM reminder_deliveries d WHERE d.uid = e.uid AND d.day = ${day})`;
   let sent = 0;
   for (const c of candidates) {

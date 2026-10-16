@@ -220,4 +220,34 @@ export const migrations: Migration[] = [
       );
     `,
   },
+  {
+    // Много компаний в одном боте: у каждой своя команда, рабочий чат, настройки и данные.
+    // Существующие данные переносятся в компанию № 1 при старте (см. core/companies.ts → bootstrapLegacy).
+    id: "008_companies",
+    sql: `
+      CREATE TABLE IF NOT EXISTS companies(
+        id SERIAL PRIMARY KEY, name TEXT NOT NULL, owner_uid BIGINT NOT NULL,
+        invite_code TEXT NOT NULL UNIQUE, bind_code TEXT NOT NULL UNIQUE,
+        group_id BIGINT UNIQUE, group_title TEXT,
+        referred_by BIGINT, legacy BOOLEAN NOT NULL DEFAULT FALSE,
+        status TEXT NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      ALTER TABLE employees ADD COLUMN IF NOT EXISTS company_id INTEGER, ADD COLUMN IF NOT EXISTS joined_at TIMESTAMPTZ;
+      ALTER TABLE reports ADD COLUMN IF NOT EXISTS company_id INTEGER;
+      ALTER TABLE accruals ADD COLUMN IF NOT EXISTS company_id INTEGER;
+      ALTER TABLE payments ADD COLUMN IF NOT EXISTS company_id INTEGER;
+      ALTER TABLE payment_audit ADD COLUMN IF NOT EXISTS company_id INTEGER;
+      ALTER TABLE directions ADD COLUMN IF NOT EXISTS company_id INTEGER;
+      ALTER TABLE bonus_rules ADD COLUMN IF NOT EXISTS company_id INTEGER;
+      ALTER TABLE promotions ADD COLUMN IF NOT EXISTS company_id INTEGER;
+      ALTER TABLE stories ADD COLUMN IF NOT EXISTS company_id INTEGER;
+      ALTER TABLE salary_overrides ADD COLUMN IF NOT EXISTS company_id INTEGER;
+      ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS company_id INTEGER;
+      ALTER TABLE bonus_rules DROP CONSTRAINT IF EXISTS bonus_rules_code_key;
+      CREATE UNIQUE INDEX IF NOT EXISTS bonus_rules_company_code ON bonus_rules(company_id, code) WHERE code IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS employees_company ON employees(company_id);
+      CREATE INDEX IF NOT EXISTS reports_company_day ON reports(company_id, day);
+      CREATE INDEX IF NOT EXISTS accruals_company_period ON accruals(company_id, period_start);
+    `,
+  },
 ];

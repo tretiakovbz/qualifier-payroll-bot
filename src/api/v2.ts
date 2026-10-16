@@ -18,6 +18,8 @@ import { salaryOverview, setSalaryProfile, setSalaryOverride, SalaryError, month
 import { checkAchievements, recordsOf, streaks, DEFS } from "../core/achievements.ts";
 import { listPromos, savePromo, listStories, saveStory, hideStory, PromoError } from "../core/promos.ts";
 import { sendDocument } from "../lib/telegram.ts";
+import { cid, tryCid, withCompany, NoCompanyError } from "../core/tenant.ts";
+import { getCompany, companyByInvite, createCompany, joinCompany, leaveCompany, renameCompany, resetInvite, inviteLink, bindLink, CompanyError } from "../core/companies.ts";
 
 type Ctx = { req: Request; url: URL; user: TgUser; params: Record<string, string> };
 type Handler = (c: Ctx) => Promise<Response>;
@@ -37,8 +39,10 @@ function demoUser(): TgUser {
 
 const me: Handler = async ({ user, url }) => {
   if (url.searchParams.get("demo") === "1") return ok(demoMe());
-  const e = await staff.touch(user);
+  const e = (await staff.getEmployee(user.id))!;
   const level = staff.adminLevelOf(e);
+  const company = e.company_id ? await getCompany(e.company_id) : null;
+  const contact = company ? (await db`SELECT username FROM employees WHERE company_id = ${company.id} AND admin_level IS NOT NULL AND username IS NOT NULL ORDER BY admin_level = 'owner' DESC LIMIT 1`)[0]?.username ?? null : null;
   const base = {
     uid: e.uid,
     name: staff.displayName(e),
@@ -49,7 +53,8 @@ const me: Handler = async ({ user, url }) => {
     adminLevel: level,
     prefs: e.prefs ?? {},
     phone: e.phone,
-    contact: config.approverUsernames[0] ?? null,
+    contact,
+    company: company ? { id: company.id, name: company.name, isOwner: company.owner_uid === e.uid, groupBound: Boolean(company.group_id) } : null,
   };
   if (e.status !== "active" || !e.role) return ok({ ...base, registered: e.status === "pending" && Boolean(e.role) });
 
@@ -94,21 +99,85 @@ function accrualView(a: any) {
 /** Серия: подряд рабочих дней с отчётом (сегодня или вчера — последний) */
 async function streakOf(uid: number, day: string): Promise<number> {
   const s = await getSettings();
-  const rows = await db`SELECT DISTINCT day::text AS day FROM reports WHERE uid = ${uid} AND chat = ${config.groupId}
+  const rows = await db`SELECT DISTINCT day::text AS day FROM reports WHERE uid = ${uid} AND company_id = ${cid()}
     AND day > ${addDays(day, -400)}`;
   return streaks(rows.map((r: any) => r.day), day, s.week).current;
 }
 
-const register: Handler = async ({ req, user }) => {
-  const b = await body<{ fullName: string; city?: string; role: Role; phone?: string }>(req);
-  await staff.touch(user, { canDm: false });
+// ───────────── Компании: создание, приглашение, выход ─────────────
+
+function companyError(e: unknown): Response {
+  if (e instanceof CompanyError) return fail(400, e.message);
+  throw e;
+}
+
+/** Руководитель создаёт свою компанию */
+const companyCreate: Handler = async ({ req, user }) => {
+  const b = await body<{ name: string; fullName: string; city?: string; phone?: string; ref?: string }>(req);
   try {
-    const e = await staff.register(user.id, { fullName: b.fullName ?? "", city: b.city, role: b.role, phone: b.phone });
-    await announceRegistration(e);
-    return ok({ status: e.status, role: e.role });
-  } catch (err) {
-    if (err instanceof staff.RegistrationError) return fail(400, err.message);
-    throw err;
+    const c = await createCompany({ uid: user.id }, { name: b.name, fullName: b.fullName, city: b.city, phone: b.phone, ref: b.ref ?? null });
+    return ok({ id: c.id, name: c.name });
+  } catch (e) {
+    return companyError(e);
+  }
+};
+
+/** Что за компания по ссылке-приглашению — до вступления */
+const joinPreview: Handler = async ({ params, user }) => {
+  const c = await companyByInvite(params.code);
+  if (!c) return fail(404, "Ссылка-приглашение недействительна. Попросите у руководителя новую.");
+  const n = (await db`SELECT COUNT(*)::int AS n FROM employees WHERE company_id = ${c.id} AND status = 'active'`)[0].n;
+  const ownerRow = (await db`SELECT full_name, name FROM employees WHERE uid = ${c.owner_uid}`)[0];
+  const e = await staff.getEmployee(user.id);
+  const current = e?.company_id ? await getCompany(e.company_id) : null;
+  return ok({
+    company: { name: c.name, members: n, owner: ownerRow ? staff.displayName(ownerRow) : null },
+    me: { inThis: current?.id === c.id, status: e?.status ?? "new", current: current && current.id !== c.id ? { name: current.name, isOwner: current.owner_uid === user.id } : null },
+  });
+};
+
+/** Сотрудник вступает по ссылке: заявка уходит руководителю */
+const joinPost: Handler = async ({ params, req, user }) => {
+  const b = await body<{ fullName: string; city?: string; role: Role; phone?: string }>(req);
+  try {
+    const r = await joinCompany(user.id, params.code, { fullName: b.fullName, city: b.city, role: b.role, phone: b.phone });
+    const e = (await staff.getEmployee(user.id))!;
+    await withCompany(r.company.id, () => announceRegistration(e));
+    return ok({ status: r.status, company: r.company.name });
+  } catch (e) {
+    return companyError(e);
+  }
+};
+
+/** Сотрудник сам выходит из компании */
+const leave: Handler = async ({ user }) => {
+  try {
+    await leaveCompany(user.id);
+    return ok({ ok: true });
+  } catch (e) {
+    return companyError(e);
+  }
+};
+
+const adminCompany: Handler = async ({ user }) => {
+  const c = (await getCompany(cid()))!;
+  const staffCount = (await db`SELECT COUNT(*)::int AS n FROM employees WHERE company_id = ${c.id} AND status = 'active' AND role IS NOT NULL`)[0].n;
+  return ok({
+    id: c.id, name: c.name, isOwner: c.owner_uid === user.id,
+    inviteLink: inviteLink(c), bindLink: bindLink(c),
+    group: c.group_id ? { id: c.group_id, title: c.group_title } : null,
+    staff: staffCount, createdAt: c.created_at,
+  });
+};
+
+const adminCompanySave: Handler = async ({ req, user }) => {
+  const b = await body<{ name?: string; resetInvite?: boolean }>(req);
+  try {
+    if (b.name !== undefined) await renameCompany(cid(), b.name, user.id);
+    if (b.resetInvite) await resetInvite(cid(), user.id);
+    return adminCompany({ req, user } as Ctx);
+  } catch (e) {
+    return companyError(e);
   }
 };
 
@@ -178,6 +247,13 @@ const notifications: Handler = async ({ user, req }) => {
 
 // ───────────── Админ ─────────────
 
+/** Человек в этой компании сейчас или был в ней (есть начисления) — иначе админ чужой компании его не трогает */
+async function inCompany(uid: number): Promise<boolean> {
+  const r = await db`SELECT 1 FROM employees WHERE uid = ${uid} AND company_id = ${cid()}
+    UNION ALL SELECT 1 FROM accruals WHERE uid = ${uid} AND company_id = ${cid()} LIMIT 1`;
+  return r.length > 0;
+}
+
 function admin(min: "manager" | "owner", h: Handler): Handler {
   return async (c) => {
     const level = await staff.adminLevel(c.user);
@@ -228,6 +304,7 @@ const adminEmployees: Handler = async () => {
 
 const adminEmployeeAction: Handler = async ({ req, user, params }) => {
   const uid = Number(params.uid);
+  if (!(await inCompany(uid))) return fail(404, "Сотрудник не найден");
   const b = await body<{ action: "approve" | "reject" | "archive" | "make_manager" | "remove_manager" }>(req);
   const level = await staff.adminLevel(user);
   switch (b.action) {
@@ -281,6 +358,7 @@ const adminDirectionSave: Handler = async ({ req, user }) => {
 const adminAccrualCreate: Handler = async ({ req, user }) => {
   const b = await body<{ uid: number; amount: number; comment: string; ruleId?: number }>(req);
   if (!b.uid || !b.comment?.trim()) return fail(400, "Укажите сотрудника и за что начисление");
+  if (!(await inCompany(Number(b.uid)))) return fail(404, "Сотрудник не найден");
   try {
     return ok(await manualAccrual({ uid: Number(b.uid), amount: Number(b.amount), comment: b.comment.trim(), ruleId: b.ruleId, actor: user.id }));
   } catch (e: any) {
@@ -305,6 +383,7 @@ const adminManualSet: Handler = async ({ req, user, params }) => {
   const rule = await getRule(Number(params.id));
   if (!rule || rule.kind !== "manual") return fail(404, "Нет такого ручного бонуса");
   const b = await body<{ key: string; uid: number; award: boolean; amount?: number }>(req);
+  if (b.uid && !(await inCompany(Number(b.uid)))) return fail(404, "Сотрудник не найден");
   if (!b.key || !b.uid) return fail(400, "Неполные данные");
   await setManualAward(rule, b.key, Number(b.uid), Boolean(b.award), user.id, b.amount);
   return ok(await manualCandidates(rule, b.key));
@@ -323,7 +402,7 @@ const adminAnalytics: Handler = async ({ url }) => {
   const money = await db`
     SELECT a.uid, COALESCE(e.full_name, e.name) AS name, e.role, a.kind, COALESCE(SUM(a.amount), 0)::int AS sum
     FROM accruals a JOIN employees e ON e.uid = a.uid
-    WHERE a.cancelled_at IS NULL AND a.day BETWEEN ${from} AND ${to}
+    WHERE a.company_id = ${cid()} AND a.cancelled_at IS NULL AND a.day BETWEEN ${from} AND ${to}
     GROUP BY a.uid, e.full_name, e.name, e.role, a.kind`;
   out.money = money;
   const cur = periodOf(undefined, s.payoutDays);
@@ -336,6 +415,7 @@ const adminAnalytics: Handler = async ({ url }) => {
 
 const adminPayout: Handler = async ({ req, user }) => {
   const b = await body<{ uid: number; periodStart?: string; amount?: number }>(req);
+  if (!(await inCompany(Number(b.uid)))) return fail(404, "Сотрудник не найден");
   const s = await getSettings();
   const period = b.periodStart ? periodOf(b.periodStart, s.payoutDays) : periodBack(1, undefined, s.payoutDays);
   const sum = await markPaid(Number(b.uid), period, user.id, b.amount);
@@ -345,12 +425,12 @@ const adminPayout: Handler = async ({ req, user }) => {
 const adminEmployee: Handler = async ({ params }) => {
   const uid = Number(params.uid);
   const e = await staff.getEmployee(uid);
-  if (!e) return fail(404, "Сотрудник не найден");
+  if (!e || !(await inCompany(uid))) return fail(404, "Сотрудник не найден");
   const s = await getSettings();
   const cur = periodOf(undefined, s.payoutDays);
   const prev = periodBack(1, undefined, s.payoutDays);
   const accruals = await db`SELECT id, kind, amount, day::text AS day, comment, created_by, cancelled_at FROM accruals
-    WHERE uid = ${uid} ORDER BY day DESC, id DESC LIMIT 60`;
+    WHERE uid = ${uid} AND company_id = ${cid()} ORDER BY day DESC, id DESC LIMIT 60`;
   return ok({
     uid, name: staff.displayName(e), username: e.username, photoUrl: e.photo_url, role: e.role, status: e.status,
     phone: e.phone, city: e.city, adminLevel: staff.adminLevelOf(e), registeredAt: e.registered_at, approvedAt: e.approved_at,
@@ -367,6 +447,7 @@ const adminSalaryGet: Handler = async ({ params }) => {
 };
 
 const adminSalaryProfile: Handler = async ({ req, user, params }) => {
+  if (!(await inCompany(Number(params.uid)))) return fail(404, "Сотрудник не найден");
   const b = await body<{ monthly?: number | null; workStart?: string | null }>(req);
   const patch: { monthly?: number | null; workStart?: string | null } = {};
   if ("monthly" in b) patch.monthly = b.monthly === null || (b.monthly as unknown) === "" ? null : Number(b.monthly);
@@ -380,6 +461,7 @@ const adminSalaryProfile: Handler = async ({ req, user, params }) => {
 };
 
 const adminSalaryPeriod: Handler = async ({ req, user, params }) => {
+  if (!(await inCompany(Number(params.uid)))) return fail(404, "Сотрудник не найден");
   const b = await body<{ periodStart: string; amount: number | null; comment?: string }>(req);
   const amount = b.amount === null || (b.amount as unknown) === "" ? null : Number(b.amount);
   try {
@@ -486,7 +568,6 @@ function demoWeekly(role: Role, metric: Metric, weeks: number) {
 
 const routes: [string, string, Handler][] = [
   ["GET", "/api/v2/me", me],
-  ["POST", "/api/v2/register", register],
   ["POST", "/api/v2/me/prefs", prefs],
   ["GET", "/api/v2/stats/weekly", weekly],
   ["GET", "/api/v2/me/accruals", accrualsList],
@@ -494,6 +575,12 @@ const routes: [string, string, Handler][] = [
   ["GET", "/api/v2/notifications", notifications],
   ["POST", "/api/v2/notifications/read", notifications],
 
+  ["POST", "/api/v2/company", companyCreate],
+  ["GET", "/api/v2/join/:code", joinPreview],
+  ["POST", "/api/v2/join/:code", joinPost],
+  ["POST", "/api/v2/me/leave", leave],
+  ["GET", "/api/v2/admin/company", admin("manager", adminCompany)],
+  ["POST", "/api/v2/admin/company", admin("owner", adminCompanySave)],
   ["GET", "/api/v2/admin/overview", admin("manager", adminOverview)],
   ["GET", "/api/v2/admin/reports", admin("manager", adminReports)],
   ["POST", "/api/v2/admin/reports/:msg", admin("manager", adminReportDecide)],
@@ -543,8 +630,13 @@ export async function handleApiV2(req: Request, url: URL): Promise<Response | nu
     const user = verifyInitData(req.headers.get("X-Telegram-Init-Data") ?? "") ?? (isDemo ? demoUser() : null);
     if (!user) return fail(401, "Откройте приложение из Telegram");
     try {
+      if (user.id === -1) return await handler({ req, url, user, params });
+      // Контекст компании: все данные запроса — только из компании пользователя
+      const e = await staff.touch(user);
+      if (e.company_id) return await withCompany(e.company_id, () => handler({ req, url, user, params }));
       return await handler({ req, url, user, params });
     } catch (e) {
+      if (e instanceof NoCompanyError) return fail(409, e.message);
       console.error("[api]", pattern, e);
       return fail(500, "Что-то пошло не так, попробуйте ещё раз");
     }

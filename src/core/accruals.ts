@@ -4,7 +4,7 @@
 // сразу после подтверждения и по расписанию.
 
 import { db } from "../db/client.ts";
-import { config } from "../config.ts";
+import { cid } from "./tenant.ts";
 import { audit } from "../db/audit.ts";
 import { periodOf, today, addDays, type Period } from "../lib/time.ts";
 import { reportAmount, type ReportMetrics, type Role } from "../lib/report.ts";
@@ -52,9 +52,9 @@ export async function createAccrual(a: {
   const s = await getSettings();
   const [periodStart] = periodOf(a.day, s.payoutDays);
   const rows = await db`
-    INSERT INTO accruals(uid, kind, amount, period_start, day, dedupe_key, rule_id, report_chat, report_msg, comment, created_by)
+    INSERT INTO accruals(uid, kind, amount, period_start, day, dedupe_key, rule_id, report_chat, report_msg, comment, created_by, company_id)
     VALUES(${a.uid}, ${a.kind}, ${Math.round(a.amount)}, ${periodStart}, ${a.day}, ${a.dedupeKey ?? null},
-      ${a.ruleId ?? null}, ${a.report?.chat ?? null}, ${a.report?.msg ?? null}, ${a.comment ?? null}, ${a.createdBy ?? null})
+      ${a.ruleId ?? null}, ${a.report?.chat ?? null}, ${a.report?.msg ?? null}, ${a.comment ?? null}, ${a.createdBy ?? null}, ${cid()})
     ON CONFLICT (dedupe_key) WHERE cancelled_at IS NULL DO NOTHING
     RETURNING *`;
   return rows[0] ?? null;
@@ -62,7 +62,7 @@ export async function createAccrual(a: {
 
 export async function cancelAccrual(id: number, actor: number): Promise<Accrual | null> {
   const rows = await db`UPDATE accruals SET cancelled_at = now(), cancelled_by = ${actor}
-    WHERE id = ${id} AND cancelled_at IS NULL RETURNING *`;
+    WHERE id = ${id} AND company_id = ${cid()} AND cancelled_at IS NULL RETURNING *`;
   if (rows[0]) await audit(actor, "accrual.cancel", { id, uid: rows[0].uid, amount: rows[0].amount });
   return rows[0] ?? null;
 }
@@ -80,13 +80,13 @@ export async function reconcileReports(opts: { notifyRecentDays?: number } = {})
   const cancelled = await db`
     UPDATE accruals a SET cancelled_at = now()
     FROM reports r
-    WHERE a.cancelled_at IS NULL AND a.report_chat = r.chat AND a.report_msg = r.msg
+    WHERE a.cancelled_at IS NULL AND a.company_id = ${cid()} AND r.company_id = ${cid()} AND a.report_chat = r.chat AND a.report_msg = r.msg
       AND (a.dedupe_key LIKE 'report:%' OR a.dedupe_key LIKE 'promo:%:report:%') AND r.status <> 'approved'
     RETURNING a.uid, a.amount, r.status`;
 
   const pending = await db`
     SELECT r.* FROM reports r
-    WHERE r.chat = ${config.groupId} AND r.status = 'approved'
+    WHERE r.company_id = ${cid()} AND r.status = 'approved'
       AND NOT EXISTS (
         SELECT 1 FROM accruals a
         WHERE a.dedupe_key = 'report:' || r.chat || ':' || r.msg AND a.cancelled_at IS NULL
@@ -132,8 +132,8 @@ export async function reconcileReports(opts: { notifyRecentDays?: number } = {})
     const touched = new Map<number, Role>();
     for (const r of pending) touched.set(Number(r.uid), (r.role ?? "qualifier") as Role);
     for (const [uid, role] of touched) {
-      const e = await db`SELECT status, role FROM employees WHERE uid = ${uid}`;
-      if (e[0]?.status === "active" && e[0]?.role === role) await checkAchievements(uid, role).catch((err) => console.error("[achievements]", err));
+      const e = await db`SELECT status, role, company_id FROM employees WHERE uid = ${uid}`;
+      if (e[0]?.status === "active" && e[0]?.role === role && Number(e[0]?.company_id) === cid()) await checkAchievements(uid, role).catch((err) => console.error("[achievements]", err));
     }
   }
   return { created, cancelled: cancelled.length };
@@ -173,17 +173,17 @@ export interface Balance {
 
 export async function balanceOf(uid: number, period: Period): Promise<Balance> {
   const rows = await db`SELECT kind, COALESCE(SUM(amount), 0)::int AS sum FROM accruals
-    WHERE uid = ${uid} AND period_start = ${period[0]} AND cancelled_at IS NULL GROUP BY kind`;
+    WHERE uid = ${uid} AND company_id = ${cid()} AND period_start = ${period[0]} AND cancelled_at IS NULL GROUP BY kind`;
   const byKind: Record<string, number> = {};
   for (const r of rows) byKind[r.kind] = r.sum;
   const accrued = Object.values(byKind).reduce((s, n) => s + n, 0);
-  const paidRows = await db`SELECT amount FROM payments WHERE uid = ${uid} AND period = ${period[0]}`;
+  const paidRows = await db`SELECT amount FROM payments WHERE uid = ${uid} AND period = ${period[0]} AND company_id = ${cid()}`;
   const paid = paidRows.length ? paidRows[0].amount : null;
   return { period, accrued, byKind, paid, balance: accrued - (paid ?? 0) };
 }
 
 export async function recentAccruals(uid: number, limit = 20): Promise<Accrual[]> {
-  return db`SELECT * FROM accruals WHERE uid = ${uid} AND cancelled_at IS NULL AND amount <> 0
+  return db`SELECT * FROM accruals WHERE uid = ${uid} AND company_id = ${cid()} AND cancelled_at IS NULL AND amount <> 0
     ORDER BY day DESC, id DESC LIMIT ${limit}`;
 }
 
@@ -198,8 +198,8 @@ export async function payroll(period: Period) {
       p.amount AS paid
     FROM accruals a
     JOIN employees e ON e.uid = a.uid
-    LEFT JOIN payments p ON p.uid = a.uid AND p.period = ${period[0]}
-    WHERE a.period_start = ${period[0]} AND a.cancelled_at IS NULL
+    LEFT JOIN payments p ON p.uid = a.uid AND p.period = ${period[0]} AND p.company_id = ${cid()}
+    WHERE a.company_id = ${cid()} AND a.period_start = ${period[0]} AND a.cancelled_at IS NULL
     GROUP BY e.uid, e.full_name, e.name, e.role, p.amount
     ORDER BY e.role, total DESC`;
 }
@@ -208,10 +208,10 @@ export async function markPaid(uid: number, period: Period, actor: number, amoun
   const b = await balanceOf(uid, period);
   const sum = amount ?? b.accrued;
   await db.begin(async (tx) => {
-    await tx`INSERT INTO payments(uid, period, amount) VALUES(${uid}, ${period[0]}, ${sum})
-      ON CONFLICT(uid, period) DO UPDATE SET amount = excluded.amount, paid_at = now()`;
-    await tx`INSERT INTO payment_audit(uid, period, actor, amount) VALUES(${uid}, ${period[0]}, ${actor}, ${sum})
-      ON CONFLICT(uid, period) DO UPDATE SET amount = excluded.amount, actor = excluded.actor, marked_at = now()`;
+    await tx`INSERT INTO payments(uid, period, amount, company_id) VALUES(${uid}, ${period[0]}, ${sum}, ${cid()})
+      ON CONFLICT(uid, period) DO UPDATE SET amount = excluded.amount, paid_at = now(), company_id = excluded.company_id`;
+    await tx`INSERT INTO payment_audit(uid, period, actor, amount, company_id) VALUES(${uid}, ${period[0]}, ${actor}, ${sum}, ${cid()})
+      ON CONFLICT(uid, period) DO UPDATE SET amount = excluded.amount, actor = excluded.actor, marked_at = now(), company_id = excluded.company_id`;
   });
   await audit(actor, "payout.mark", { uid, period: period[0], amount: sum });
   await notify(uid, { kind: "payout", title: `Выплата отмечена: ${rub(sum)}`, body: "Спасибо за работу!", amount: sum });

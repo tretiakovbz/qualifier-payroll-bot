@@ -2,7 +2,7 @@
 // Полученное достижение запоминается навсегда и один раз приходит праздничным уведомлением в приложении.
 
 import { db } from "../db/client.ts";
-import { config } from "../config.ts";
+import { cid } from "./tenant.ts";
 import { today, addDays, weekOf, monthOf, humanRange, humanDay, type WeekConfig } from "../lib/time.ts";
 import type { Role } from "../lib/report.ts";
 import { getSettings } from "./settings.ts";
@@ -107,9 +107,9 @@ export async function statsOf(uid: number, role: Role): Promise<{ stats: Stats; 
       SUM(COALESCE((metrics->>'docs')::int, 0))::int AS docs,
       SUM(COALESCE((metrics->>'vvk')::int, 0))::int AS vvk,
       COUNT(*)::int AS reports
-    FROM reports WHERE uid = ${uid} AND chat = ${config.groupId} AND status = 'approved' AND role = ${role}
+    FROM reports WHERE uid = ${uid} AND company_id = ${cid()} AND status = 'approved' AND role = ${role}
     GROUP BY day ORDER BY day`) as any[];
-  const allDays = (await db`SELECT DISTINCT day::text AS day FROM reports WHERE uid = ${uid} AND chat = ${config.groupId}`).map((r: any) => r.day);
+  const allDays = (await db`SELECT DISTINCT day::text AS day FROM reports WHERE uid = ${uid} AND company_id = ${cid()}`).map((r: any) => r.day);
   const byWeek = new Map<string, number>();
   const byMonth = new Map<string, number>();
   for (const r of daily) {
@@ -122,7 +122,7 @@ export async function statsOf(uid: number, role: Role): Promise<{ stats: Stats; 
     SELECT COUNT(*) FILTER (WHERE a.kind IN ('bonus','promo','manual'))::int AS bonuses,
       COUNT(*) FILTER (WHERE a.kind = 'bonus' AND b.kind = 'top_metric')::int AS top
     FROM accruals a LEFT JOIN bonus_rules b ON b.id = a.rule_id
-    WHERE a.uid = ${uid} AND a.cancelled_at IS NULL AND a.amount > 0`;
+    WHERE a.uid = ${uid} AND a.company_id = ${cid()} AND a.cancelled_at IS NULL AND a.amount > 0`;
   const st = streaks(allDays, today(), s.week);
   const sum = (k: string) => daily.reduce((acc, r) => acc + (r[k] ?? 0), 0);
   return {
@@ -179,7 +179,7 @@ export async function recordsOf(uid: number, role: Role, daily: { day: string; f
   let bestWeek = { value: 0, label: null as string | null };
   for (const [wk, v] of weeks) if (v > bestWeek.value) bestWeek = { value: v, label: humanRange(weekOf(wk, s.week)) };
   const money = await db`SELECT period_start::text AS p, SUM(amount)::int AS sum FROM accruals
-    WHERE uid = ${uid} AND cancelled_at IS NULL GROUP BY period_start ORDER BY sum DESC LIMIT 1`;
+    WHERE uid = ${uid} AND company_id = ${cid()} AND cancelled_at IS NULL GROUP BY period_start ORDER BY sum DESC LIMIT 1`;
   const { periodOf } = await import("../lib/time.ts");
   return {
     metric: key,
